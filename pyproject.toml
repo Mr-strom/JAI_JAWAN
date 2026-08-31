@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "jai-jawan-model-a"
+version = "1.0.0"
+description = "Model A — AI-Based Intelligent Video Analytics Platform for Border Surveillance (SIH26187)"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+    "paho-mqtt>=1.6",
+    "opencv-python-headless>=4.8",
+    "numpy>=1.24",
+    "ultralytics>=8.0",   # YOLOv8n
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-timeout>=2.1",
+]
+
+[tool.pytest.ini_options]
+timeout = 30
+log_cli = true
+log_cli_level = "DEBUG"
