@@ -95,3 +95,5 @@ sih26187/camera/{cam_id}/model_b/traj   ← Model B Trajectory (subscribe: long_
 | RAM usage | <2GB | Queue-based I/O decoupling |
 | Effective FPS | 1-5 | MSE time-sampler |
 | End-to-end critical latency | <5s | QoS 2 on confirmed/critical |
+
+| Manual Verify | Real-video end-to-end validation | ✅ | 1 divergence flagged (tracker ID switch) |
