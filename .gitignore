@@ -110,7 +110,7 @@ mosquitto_data/
 mosquitto.pid
 
 # ---------------------------------------------------------------------------
-# Docs build output (keep source, ignore build)
+# Documentation (local only)
 # ---------------------------------------------------------------------------
-docs/_build/
+docs/
 site/
