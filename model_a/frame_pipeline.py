@@ -337,7 +337,7 @@ class FramePipeline:
                     processing_time_ms = 0,
                     frame_number       = frame_number,
                     trigger_type       = trigger_type,
-                    confirmation_frames = confirmation_frames,
+                    confirmation_frames = min(10, confirmation_frames),
                     spoofing_flags     = spoofing_flags,
                 ),
             )
