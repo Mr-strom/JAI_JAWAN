@@ -1,0 +1,31 @@
+{
+  "_comment": "Example homography calibration for Model A cameras. Add one entry per camera that needs perspective correction. Points are in absolute pixels for the camera's NATIVE resolution (e.g. 1920x1080). src_points = raw frame corners of the region to rectify (top-left, top-right, bottom-right, bottom-left order). dst_points = where those corners map to in the corrected bird's-eye view (same image size).",
+  "cam_chokepoint_01": {
+    "src_points": [
+      [320, 200],
+      [1600, 200],
+      [1800, 900],
+      [120, 900]
+    ],
+    "dst_points": [
+      [320, 200],
+      [1600, 200],
+      [1600, 900],
+      [320, 900]
+    ]
+  },
+  "cam_icp_gate_north": {
+    "src_points": [
+      [200, 150],
+      [1720, 150],
+      [1900, 950],
+      [20, 950]
+    ],
+    "dst_points": [
+      [200, 150],
+      [1720, 150],
+      [1720, 950],
+      [200, 950]
+    ]
+  }
+}

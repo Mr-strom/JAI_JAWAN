@@ -25,13 +25,16 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import time
 import uuid
 from typing import List, Optional
 
 import numpy as np
 
 from model_a.animal_filter import AnimalFilter
+from model_a.animal_cart_fuser import AnimalCartFuser
 from model_a.anti_spoofing import AntiSpoofingChecker
+from model_a.homography import HomographyCorrector
 from model_a.bbox_consistency import BBoxConsistencyChecker
 from model_a.bus_client import BusClient
 from model_a.detector import Detection, Detector
@@ -92,6 +95,8 @@ class FramePipeline:
         anti_spoofing: Optional[AntiSpoofingChecker] = None,
         bbox_checker:  Optional[BBoxConsistencyChecker] = None,
         animal_filter: Optional[AnimalFilter]         = None,
+        animal_cart_fuser: Optional[AnimalCartFuser]   = None,
+        homography: Optional[HomographyCorrector]      = None,
     ) -> None:
         self.camera_id  = camera_id
         self._zone      = zone_tagger
@@ -106,6 +111,9 @@ class FramePipeline:
         self._spoof = anti_spoofing   or AntiSpoofingChecker(camera_id)
         self._bbox  = bbox_checker    or BBoxConsistencyChecker()
         self._afilt = animal_filter   or AnimalFilter()
+        self._cart_fuse = animal_cart_fuser or AnimalCartFuser()
+        # Homography is purely optional — None means no perspective correction
+        self._homography: Optional[HomographyCorrector] = homography
 
         os.makedirs(EVIDENCE_DIR, exist_ok=True)
 
@@ -132,6 +140,12 @@ class FramePipeline:
         # --- Step 1: Low-light preprocessing ---
         frame = self._pre.enhance(frame)
 
+        # --- Step 1b: Homography perspective correction (chokepoint/ICP cameras) ---
+        # Applied before YOLO so bbox coordinates are already in the corrected space.
+        # No-op if this camera_id has no calibration entry.
+        if self._homography is not None:
+            frame = self._homography.correct_frame(self.camera_id, frame)
+
         # --- Step 2: Time sampling (MSE dedup) ---
         accepted, frame = self._samp.accept(frame)
         if not accepted:
@@ -148,15 +162,81 @@ class FramePipeline:
         # NOTE: spoof_report.is_suspicious does NOT suppress the event.
         # Flags are stored and forwarded in metadata. (Rule #8)
 
-        # --- Step 5: YOLO detection ---
-        detections = self._detector.detect(frame, frame_number)
+        # --- Step 5: Detection — dual-zone routing ---
+        #
+        # STRATEGY:
+        #   close_range detections → YOLOv8n (fast; reliable for large bboxes)
+        #   long_range  detections → YOLOv8s (better sensitivity for small/distant humans)
+        #
+        # We cannot do "upgrade only what v8n found" because v8n MISSES the person
+        # entirely at low confidence — there is no bbox to upgrade from.
+        # Instead:
+        #   Pass 1: v8n full-frame  → keep all close_range hits.
+        #   Pass 2: v8s full-frame  → keep all long_range hits.
+        #   Final list: union of both, deduplicated by zone.
+        #
+        t0_v8n = time.perf_counter()
+        v8n_dets = self._detector.detect(frame, frame_number)
+        t_v8n_ms = (time.perf_counter() - t0_v8n) * 1000
+
+        # Classify v8n results by zone; keep only close_range ones.
+        close_range_dets = []
+        has_any_long_range_v8n = False
+        for det in v8n_dets:
+            zone_tag_val, _ = self._zone.tag(det.bbox)
+            if zone_tag_val.value == "close_range":
+                close_range_dets.append(det)
+            else:
+                has_any_long_range_v8n = True  # v8n saw something distant (weak signal)
+
+        # Pass 2: run v8s on the full frame and keep only long_range results.
+        # We always run v8s here because v8n may have MISSED the distant person.
+        t0_v8s = time.perf_counter()
+        v8s_dets = self._detector.detect_full_frame_long_range(frame, frame_number)
+        t_v8s_ms = (time.perf_counter() - t0_v8s) * 1000
+
+        long_range_dets = []
+        for det in v8s_dets:
+            zone_tag_val, _ = self._zone.tag(det.bbox)
+            if zone_tag_val.value == "long_range":
+                long_range_dets.append(det)
+
+        detections = close_range_dets + long_range_dets
+
+        logger.debug(
+            "cam=%s frame=%d | v8n=%.1fms(%d close) | v8s=%.1fms(%d long)",
+            self.camera_id, frame_number,
+            t_v8n_ms, len(close_range_dets),
+            t_v8s_ms, len(long_range_dets),
+        )
 
         # --- Step 6: Animal filtering ---
         animal_dets, trigger_candidates = self._afilt.classify(detections)
 
-        # Publish animal_detected info events
+        # --- Step 6b: Animal-cart proximity fusion ---
+        # Separate vehicles from trigger_candidates so the fuser can check
+        # animal×vehicle proximity. Non-vehicle triggers are unaffected.
+        vehicle_dets    = [d for d in trigger_candidates
+                           if d.entity_type == EntityType.vehicle]
+        non_veh_triggers = [d for d in trigger_candidates
+                            if d.entity_type != EntityType.vehicle]
+
+        animal_dets, vehicle_dets, cart_dets = self._cart_fuse.fuse(
+            animal_dets, vehicle_dets, frame_number
+        )
+
+        # Merge vehicle dets (unfused) back into trigger_candidates
+        trigger_candidates = non_veh_triggers + vehicle_dets
+
+        # Publish animal_detected info events for plain animals
         for adet in animal_dets:
             event = self._build_animal_event(adet, frame_number, timestamp_utc, spoof_report.flags)
+            self._publish(event)
+            published.append(event)
+
+        # Publish animal_detected info events for confirmed animal_cart detections
+        for cdet in cart_dets:
+            event = self._build_animal_event(cdet, frame_number, timestamp_utc, spoof_report.flags)
             self._publish(event)
             published.append(event)
 

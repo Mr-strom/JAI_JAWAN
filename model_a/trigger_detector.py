@@ -61,6 +61,7 @@ class TrackRecord:
     last_seen_time:    float = field(default_factory=time.monotonic)
     confirmed_at:      Optional[float] = None   # monotonic time of confirmation
     cooldown_until:    float = 0.0              # monotonic time
+    last_published_severity: Optional[Severity] = None  # dedup guard: last severity that was published
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +141,7 @@ class TriggerDetector:
                 # Cooldown expired — reset
                 rec.state = TriggerState.IDLE
                 rec.confirmation_frames = 0
+                rec.last_published_severity = None
 
         # --- Advance state machine ---
         rec.trigger_type  = trigger_type
@@ -177,6 +179,14 @@ class TriggerDetector:
         else:
             severity = Severity.provisional  # fallback
 
+        # --- Dedup guard: fire-once-per-severity-transition ---
+        # Publish only when severity transitions to a new (higher) level.
+        # Repeated frames at the same severity are suppressed to prevent
+        # alert flooding (Divergence #1 in Phase Zurich report).
+        is_transition = (severity != rec.last_published_severity)
+        if is_transition and severity in (Severity.confirmed, Severity.critical):
+            rec.last_published_severity = severity
+
         return TriggerResult(
             track_id=track_id,
             state=rec.state,
@@ -184,6 +194,7 @@ class TriggerDetector:
             confirmation_frames=rec.confirmation_frames,
             trigger_type=trigger_type,
             frame_number=frame_number,
+            is_transition=is_transition,
         )
 
     def miss(self, track_id: str) -> None:
@@ -207,6 +218,7 @@ class TriggerDetector:
             )
             rec.state = TriggerState.IDLE
             rec.confirmation_frames = 0
+            rec.last_published_severity = None
 
         elif rec.state == TriggerState.CONFIRMED_TRIGGER:
             # Track lost after confirmation — enter cooldown
@@ -268,8 +280,14 @@ class TriggerResult:
     confirmation_frames: int
     trigger_type:        TriggerType
     frame_number:        int
+    is_transition:       bool = True          # True only on severity transitions
 
     @property
     def should_publish(self) -> bool:
-        """Only publish if severity is set."""
-        return self.severity is not None
+        """Publish only on severity transitions to confirmed/critical.
+        
+        Prevents duplicate alert firing for the same track at the same
+        severity level (Divergence #1 fix). Provisional events are still
+        suppressed by pipeline logic (severity != confirmed/critical).
+        """
+        return self.severity is not None and self.is_transition

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # Reference resolution for height normalisation
 _REF_HEIGHT_PX = 1080
-_CLOSE_RANGE_THRESHOLD_PX = 200  # at 1080p
+_CLOSE_RANGE_THRESHOLD_PX = 200  # default at 1080p (spec SIH26187)
 
 
 class ZoneTagger:
@@ -49,11 +49,24 @@ class ZoneTagger:
         frame_height_px: int = 1080,
         static_zone_tag: Optional[ZoneTag] = None,
         static_zone: Optional[Zone] = None,
+        zone_boundary_px: int = _CLOSE_RANGE_THRESHOLD_PX,
     ) -> None:
-        self.camera_id       = camera_id
-        self.frame_height_px = frame_height_px
-        self.static_zone_tag = static_zone_tag
-        self.static_zone     = static_zone
+        """
+        Args:
+            camera_id:        Unique camera identifier.
+            frame_height_px:  Actual camera resolution height for normalisation.
+            static_zone_tag:  If set, all detections are forced to this tag.
+            static_zone:      If set, all detections are forced to this Zone.
+            zone_boundary_px: Minimum bbox height (at 1080p equivalent) that
+                              classifies a detection as close_range.
+                              Default 200 per SIH26187 spec. Adjustable without
+                              code changes for threshold calibration.
+        """
+        self.camera_id        = camera_id
+        self.frame_height_px  = frame_height_px
+        self.static_zone_tag  = static_zone_tag
+        self.static_zone      = static_zone
+        self._zone_boundary_px = zone_boundary_px
 
         # Scale factor to normalise to 1080p
         self._scale = _REF_HEIGHT_PX / frame_height_px
@@ -87,6 +100,20 @@ class ZoneTagger:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @property
+    def zone_boundary_px(self) -> int:
+        """Threshold (at 1080p equivalent) in pixels. Exposed for visualization."""
+        return self._zone_boundary_px
+
+    @property
+    def zone_boundary_native_px(self) -> int:
+        """
+        Threshold converted back to this camera's native resolution.
+        A detection bbox taller than this (in native pixels) is close_range.
+        Use this for drawing the boundary on frames at native resolution.
+        """
+        return int(self._zone_boundary_px / self._scale)
+
     def _resolve_zone_tag(self, bbox: list[float]) -> ZoneTag:
         """Use calibration override if set, otherwise compute from bbox height."""
         if self.static_zone_tag is not None:
@@ -98,7 +125,7 @@ class ZoneTagger:
         # Normalise to 1080p equivalent
         normalised_px = native_height_px * self._scale
 
-        if normalised_px >= _CLOSE_RANGE_THRESHOLD_PX:
+        if normalised_px >= self._zone_boundary_px:
             return ZoneTag.close_range
         return ZoneTag.long_range
 
