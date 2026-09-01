@@ -1,0 +1,19 @@
+# Trajectory Engine — Dependencies
+# Pin ranges are intentionally loose; tighten for production.
+
+# Core ML
+ultralytics>=8.1.0          # YOLOv8n + built-in ByteTrack + Kalman filtering
+opencv-python-headless>=4.9.0
+
+# Event schema validation
+pydantic>=2.5.0
+
+# MQTT client
+paho-mqtt>=2.0.0
+
+# Numerics (already a transitive dep of ultralytics, listed for clarity)
+numpy>=1.24.0
+
+# FastAPI microservice wrapper + ASGI server
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0

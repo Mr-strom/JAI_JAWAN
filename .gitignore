@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments — engine-scoped venvs
+model_b/trajectory_engine/.venv/
+model_b/posture_engine/.venv/
+model_b/face_engine/.venv/
+model_b/anpr_engine/.venv/
+
+# Model weights (large binaries — download on first run)
+*.pt
+*.onnx
+
+# Evidence frames (runtime output, not source)
+model_b/trajectory_engine/evidence_frames/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log

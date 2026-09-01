@@ -1,0 +1,28 @@
+{
+  "_comment": "camera_config.json — Add one entry per camera. rtsp_url is the live RTSP stream. zone_polygons are normalised [0,1] coordinates matching the camera frame.",
+  "cam_001": {
+    "rtsp_url": "rtsp://admin:password@192.168.1.101:554/stream1",
+    "zone_polygons": {
+      "long_range":      [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+      "warning_zone":    [[0.3, 0.3], [0.7, 0.3], [0.7, 0.7], [0.3, 0.7]],
+      "intrusion_zone":  [[0.4, 0.4], [0.6, 0.4], [0.6, 0.6], [0.4, 0.6]]
+    }
+  },
+  "cam_002": {
+    "rtsp_url": "rtsp://admin:password@192.168.1.102:554/stream1",
+    "zone_polygons": {
+      "long_range":      [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+      "warning_zone":    [[0.2, 0.2], [0.8, 0.2], [0.8, 0.5], [0.2, 0.5]],
+      "intrusion_zone":  [[0.35, 0.1], [0.65, 0.1], [0.65, 0.35], [0.35, 0.35]]
+    }
+  },
+  "_demo_cam": {
+    "_note": "Use a local video file path as rtsp_url for demo mode e.g. /path/to/footage.mp4",
+    "rtsp_url": "test_footage.mp4",
+    "zone_polygons": {
+      "long_range":      [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+      "warning_zone":    [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]],
+      "intrusion_zone":  [[0.4, 0.4], [0.6, 0.4], [0.6, 0.6], [0.4, 0.6]]
+    }
+  }
+}
