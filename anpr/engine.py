@@ -61,7 +61,7 @@ class ANPREngine:
         # TODO: PaddleOCR was the original spec but is blocked by a Windows oneDNN runtime
         # crash in PaddleOCR v3.7.0 (onednn_instruction.cc:118). EasyOCR is the working
         # stand-in for the internal round. Revisit before finals if time allows.
-        self.ocr_model_name = "paddleocr-multiscript"
+        self.ocr_model_name = "easyocr-en"
 
         self._ocr_backend: Optional[str] = None  # 'paddleocr' | 'easyocr' | None
         self._init_detector()
@@ -154,9 +154,7 @@ class ANPREngine:
     # Indian plates are wide rectangles. Standard: ~520x110mm → ~4.7:1.
     # BH/Diplomatic/Defense vary but stay within 2:1–7:1.
     # Allow a generous margin since the YOLO box may not be tight.
-    PLATE_MIN_ASPECT = 2.0
-    PLATE_MAX_ASPECT = 7.0
-    PLATE_MIN_AREA_FRAC = 0.005   # width / height minimum
+    PLATE_MIN_ASPECT = 2.0   # width / height minimum
     PLATE_MAX_ASPECT = 7.0   # width / height maximum
     PLATE_MIN_AREA_FRAC = 0.005  # plate crop must be ≥ 0.5% of vehicle-crop area
 
@@ -464,7 +462,7 @@ class ANPREngine:
         entity_id = event.get("entity_id")
         evidence_ref = event.get("evidence_ref", "")
 
-        # Load frame from evidence_ref or use caller-supplied override.
+        # Load frame from evidence_ref (provisional check)
         frame = frame_override
         if frame is None:
             if evidence_ref and os.path.exists(evidence_ref):
