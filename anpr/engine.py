@@ -154,7 +154,9 @@ class ANPREngine:
     # Indian plates are wide rectangles. Standard: ~520x110mm → ~4.7:1.
     # BH/Diplomatic/Defense vary but stay within 2:1–7:1.
     # Allow a generous margin since the YOLO box may not be tight.
-    # Initial baseline   # width / height minimum
+    PLATE_MIN_ASPECT = 2.0
+    PLATE_MAX_ASPECT = 7.0
+    PLATE_MIN_AREA_FRAC = 0.005   # width / height minimum
     PLATE_MAX_ASPECT = 7.0   # width / height maximum
     PLATE_MIN_AREA_FRAC = 0.005  # plate crop must be ≥ 0.5% of vehicle-crop area
 
