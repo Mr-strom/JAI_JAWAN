@@ -151,7 +151,7 @@ class MQTTBridge:
 
         # ── Run engine ─────────────────────────────────────────────────
         try:
-            event = self._engine.process(
+            events = self._engine.process(
                 frame=frame,
                 camera_id=cam_id,
                 timestamp=timestamp,
@@ -163,14 +163,15 @@ class MQTTBridge:
             logger.exception("TrajectoryEngine.process() raised for cam %s", cam_id)
             return
 
-        if event is None:
+        if not events:
             return  # No active tracks this frame — nothing to publish
 
-        # ── Publish ────────────────────────────────────────────────────
+        # ── Publish one MQTT message per active track ───────────────────
         topic = cfg.TOPIC_PUBLISH_TEMPLATE.format(cam_id=cam_id)
-        payload_out = event.model_dump_json()
-        self._client.publish(topic, payload_out, qos=1)
-        logger.debug("Published trajectory_update for cam %s track %s", cam_id, event.entity_id)
+        for event in events:
+            payload_out = event.model_dump_json()
+            self._client.publish(topic, payload_out, qos=1)
+            logger.debug("Published trajectory_update for cam %s track %s", cam_id, event.entity_id)
 
     # ── Camera stream management ──────────────────────────────────────────
 

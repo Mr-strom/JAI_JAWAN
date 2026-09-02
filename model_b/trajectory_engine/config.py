@@ -1,6 +1,12 @@
 """
 config.py — Trajectory Engine Configuration
 All tuneable knobs live here. Do not scatter magic numbers in engine code.
+
+Coordinate convention note:
+  - All velocity and spatial thresholds are in PIXEL space.
+  - The trajectory buffer stores (cx_px, cy_px); so thresholds here must match.
+  - Zone polygons from camera_metadata are normalised [0,1] but are scaled to
+    pixels before any behaviour threshold comparisons (see trajectory_engine.py).
 """
 
 # ─── MQTT ────────────────────────────────────────────────────────────────────
@@ -28,19 +34,40 @@ MAX_TRACK_AGE: int = 30                  # frames before a lost track is dropped
 MIN_HITS: int = 3                        # frames before a track is confirmed
 
 # ─── TRAJECTORY ──────────────────────────────────────────────────────────────
-TRAJECTORY_MAX_HISTORY: int = 100        # max stored points per track
+TRAJECTORY_MAX_HISTORY: int = 100        # max stored points per track (pixels)
 TRAJECTORY_SMOOTH_WINDOW: int = 5        # last N points for velocity/direction
 
 # ─── CONFIDENCE BLENDING ─────────────────────────────────────────────────────
-TRACK_AGE_STABLE_FRAMES: int = 30       # age at which track_age_ratio reaches 1.0
-MAX_EXPECTED_DELTA_PX: float = 80.0     # pixels — erratic jump ceiling for smoothness
+# Weighted average: 0.6*det_conf + 0.2*age_factor + 0.2*smoothness
+# avoids multiplicative near-zero suppression on new tracks.
+TRACK_AGE_STABLE_FRAMES: int = 30       # age at which age_factor reaches 1.0
+MAX_EXPECTED_DELTA_PX: float = 80.0     # pixels — jump ceiling for smoothness score
 
-# ─── BEHAVIOR DETECTION ──────────────────────────────────────────────────────
-LOITER_VELOCITY_THRESHOLD_PX_S: float = 15.0   # px/s — below = "low velocity"
-LOITER_VARIANCE_THRESHOLD: float = 20.0         # px   — variance of last N positions
-LOITER_DURATION_S: float = 60.0                 # seconds a track must persist at low vel
+# ─── BEHAVIOR DETECTION (all thresholds in PIXEL space) ──────────────────────
+# Velocity thresholds — pixels per second
+LOITER_VELOCITY_THRESHOLD_PX_S: float = 15.0   # below this = "slow"
+RAPID_APPROACH_VELOCITY_THRESHOLD_PX_S: float = 80.0   # above this = "fast"
 
-RAPID_APPROACH_VELOCITY_THRESHOLD_PX_S: float = 80.0  # px/s — above = fast
+# Loitering position variance — pixels² (trajectory stores pixel coords).
+# A stationary or slightly milling person has variance in the hundreds of px².
+# Setting a minimum avoids flagging a completely frozen artifact.
+# Setting a maximum avoids flagging someone walking a large loop.
+#   Example: milling within ~15px radius → variance ≈ 15² / 2 ≈ 112 px²
+LOITER_VARIANCE_MIN_PX: float = 10.0    # px² — minimum to exclude frozen artifacts
+LOITER_VARIANCE_MAX_PX: float = 4000.0  # px² — maximum to exclude wide traversal
+
+LOITER_DURATION_S: float = 60.0         # seconds the slow+bounded condition must hold
+
+# ─── TRACK LIFECYCLE ─────────────────────────────────────────────────────────
+# Stationary duration resets to 0 when the entity resumes movement.
+# Set False to accumulate total stationary time across the track lifetime.
+STATIONARY_RESET_ON_MOVE: bool = True
+
+# ─── TRAJECTORY VISUALIZATION ────────────────────────────────────────────────
+# Number of tail points drawn as a polyline on the test overlay.
+# Configurable so you can tune visual density without touching engine logic.
+TRAJ_VIZ_POINTS: int = 30              # draw last N points as tail
+
 
 # ─── CAMERA ──────────────────────────────────────────────────────────────────
 CAMERA_CONFIG_PATH: str = "camera_config.json"  # zone polygons per cam_id

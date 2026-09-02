@@ -7,6 +7,7 @@ __pycache__/
 dist/
 build/
 *.egg
+/border_dataset
 
 # Virtual environments
 .venv/
@@ -42,3 +43,5 @@ tests/
 **/tests/
 
 /total antigravity
+/tests
+/repos
