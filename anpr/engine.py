@@ -462,7 +462,7 @@ class ANPREngine:
         entity_id = event.get("entity_id")
         evidence_ref = event.get("evidence_ref", "")
 
-        # Load frame from evidence_ref (provisional check)
+        # Load frame from evidence_ref or use caller-supplied override.
         frame = frame_override
         if frame is None:
             if evidence_ref and os.path.exists(evidence_ref):
