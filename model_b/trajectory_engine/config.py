@@ -23,18 +23,16 @@ TOPIC_HEALTH: str = "sih26187/orchestrator/health"
 HEARTBEAT_INTERVAL_S: int = 10          # publish health every N seconds
 
 # ─── MODEL ───────────────────────────────────────────────────────────────────
-# YOLO11x: strongest stable model supported by ultralytics 8.4.x on CPU.
-# Chosen over YOLO12x because on CPU-only inference YOLO11x provides near-identical
-# accuracy (54.7 vs 55.9 COCO mAP) at roughly half the FLOP cost (90 vs 200 GFLOPs),
-# giving significantly better latency per frame. Stability over novelty per project spec.
-# Upgrade path: if CUDA is added later, switch YOLO_MODEL_PATH to 'yolo12x.pt'
-# without any other code changes — the ultralytics API is identical.
+# YOLO11x: strongest stable model for this environment (RTX 4060 Laptop, CUDA 12.1).
+# YOLO12x has 1.2pt better COCO mAP but 2× the GFLOPs — not worth it on a laptop GPU.
 YOLO_MODEL_PATH: str = "yolo11x.pt"     # downloaded on first run if not present
-YOLO_CONF_THRESHOLD: float = 0.30       # slightly lower than v8n baseline (0.35);
-                                         # YOLO11x is more precise so fewer false positives
-                                         # at this threshold while recovering small targets.
+# Device: "cuda" uses the GPU when available; "cpu" forces CPU.
+# "auto" is resolved at runtime — CUDA if torch.cuda.is_available(), else CPU.
+YOLO_DEVICE: str = "auto"
+YOLO_CONF_THRESHOLD: float = 0.30
 YOLO_IOU_THRESHOLD: float = 0.45
 YOLO_CLASSES: list = [0, 2, 3, 5, 7]   # person, car, motorcycle, bus, truck
+
 
 # ─── SAHI — Sliced Inference for Small/Distant Targets ───────────────────────
 # When ENABLE_SAHI is False the engine runs exactly as before (model.track() per frame).

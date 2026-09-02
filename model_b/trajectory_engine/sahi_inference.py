@@ -221,28 +221,41 @@ def run_sahi_inference(
                  w, h, len(tiles), slice_width, slice_height,
                  overlap_width_ratio, overlap_height_ratio)
 
-    # 2. Run YOLO predict (not track) on each tile — no tracker state per tile
-    all_xyxy: List[np.ndarray] = []
-    all_conf: List[np.ndarray] = []
-    all_cls:  List[np.ndarray] = []
+    # 2. Crop all tiles and run YOLO predict in ONE batch call.
+    #    Passing a list of numpy arrays to model.predict() is the supported ultralytics
+    #    API for batched inference — it stacks tiles into a single batch tensor internally,
+    #    runs one forward pass, then splits postprocessing per-tile.
+    #    This eliminates 7 redundant preprocessing/postprocessing overhead cycles.
+    tile_imgs: List[np.ndarray] = []
+    tile_offsets: List[tuple] = []   # (x_min, y_min) per tile
 
     for x_min, y_min, x_max, y_max in tiles:
         tile = frame[y_min:y_max, x_min:x_max]
         if tile.size == 0:
             continue
+        tile_imgs.append(tile)
+        tile_offsets.append((x_min, y_min))
 
-        results = model.predict(
-            tile,
-            conf=conf_threshold,
-            iou=iou_threshold,
-            classes=classes,
-            verbose=False,
-        )
+    if not tile_imgs:
+        return None
 
-        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+    all_results = model.predict(
+        tile_imgs,
+        conf=conf_threshold,
+        iou=iou_threshold,
+        classes=classes,
+        verbose=False,
+    )
+
+    all_xyxy: List[np.ndarray] = []
+    all_conf: List[np.ndarray] = []
+    all_cls:  List[np.ndarray] = []
+
+    for result, (x_min, y_min) in zip(all_results, tile_offsets):
+        if result.boxes is None or len(result.boxes) == 0:
             continue
 
-        boxes = results[0].boxes
+        boxes = result.boxes
         xyxy_tile = boxes.xyxy.cpu().numpy().copy()  # [N,4] tile-local pixels
 
         # Remap from tile-local → full-frame coords
@@ -254,6 +267,7 @@ def run_sahi_inference(
         all_xyxy.append(xyxy_tile)
         all_conf.append(boxes.conf.cpu().numpy())
         all_cls.append(boxes.cls.cpu().numpy())
+
 
     if not all_xyxy:
         return None

@@ -353,6 +353,17 @@ class TrajectoryEngine:
         if camera_id not in self._cameras:
             model = self._YOLO(cfg.YOLO_MODEL_PATH)
 
+            # ── Device selection ─────────────────────────────────────────────
+            # Resolve "auto" at runtime so config.py never imports torch at
+            # module level (keeps import fast and avoids circular-import issues).
+            import torch as _torch
+            if cfg.YOLO_DEVICE == "auto":
+                device = "cuda" if _torch.cuda.is_available() else "cpu"
+            else:
+                device = cfg.YOLO_DEVICE
+            model.to(device)
+            logger.info("[TE] YOLO model on device=%s for cam %s", device, camera_id)
+
             bytetracker = None
             if self._sahi_enabled:
                 # Create a dedicated BYTETracker for SAHI path.
