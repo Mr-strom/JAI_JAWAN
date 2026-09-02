@@ -1,0 +1,29 @@
+# Virtual environments
+venv*/
+env/
+.venv/
+
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Testing & Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE / Editor artifacts
+.vscode/
+.idea/
+*.swp
+*~
+
+# Temporary test evidence & scratch files
+evidence/anpr_review/*.jpg
+test_images/debug_plate_crop.jpg
+test_images/heuristic_crop.jpg
+
+# Generic COCO weights (unused, replaced by models/license_plate_detector.pt)
+yolov8n.pt
