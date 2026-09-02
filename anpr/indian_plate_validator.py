@@ -29,6 +29,7 @@ DEVANAGARI_DIGITS = {
 }
 
 # Devanagari State/Letter representations commonly seen on government/state plates
+# Supports state prefixes: MH, DL, UP, RJ, HR, GJ, PB
 DEVANAGARI_CHARS = {
     'क': 'KA', 'ख': 'KH', 'ग': 'GA', 'घ': 'GH',
     'च': 'CH', 'छ': 'CHH', 'ज': 'JA', 'झ': 'JH',
