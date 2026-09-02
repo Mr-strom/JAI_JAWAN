@@ -26,6 +26,7 @@ Features implemented in Track:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -94,6 +95,51 @@ class Track:
     # 4. Zone history — chronological list of distinct zones entered
     zone_history: List[str] = field(default_factory=list)
 
+    # 5. EMA-smoothed detection confidence — reduces per-frame flicker.
+    #    Initialised to -1.0 to signal "first observation" (set directly on first hit).
+    conf_ema: float = -1.0
+
+    # 6. Hit streak (extracted from OC-SORT / Norfair pattern).
+    #    Counts consecutive frames where this track was matched to a detection.
+    #    Resets to 0 when a frame is missed (track was predicted but not observed).
+    #    More robust than frame_count for ghost suppression: a track seen 3 frames
+    #    ago but missed 5 frames has frame_count=3 but hit_streak=0.
+    hit_streak: int = 0
+
+    # 7. Last real observation centroid in pixels (OC-SORT insight).
+    #    Only updated when the track is actually matched to a detection this frame.
+    #    Used for direction calculation: prevents Kalman-drift from poisoning
+    #    the direction vector when the tracker is coasting on predictions.
+    #    None until the second detection (need two real points for a direction).
+    last_real_obs_px: Optional[Tuple[float, float]] = None
+
+    # 8. Direction EMA as a unit vector (BoT-SORT smooth_feat pattern).
+    #    Stored as (dx, dy) components rather than scalar degrees to avoid
+    #    0°/360° wraparound discontinuity in the EMA update.
+    #    Seeded with (0.0, 0.0) = unknown; first non-zero direction initialises it.
+    dir_ema_dx: float = 0.0
+    dir_ema_dy: float = 0.0
+
+    # 9. Centroid EMA — smooth stored positions before appending to trajectory.
+    #    Reduces detection jitter without touching ByteTrack's Kalman state.
+    #    None until first observation.
+    centroid_ema: Optional[Tuple[float, float]] = None
+
+    # 10. Velocity EMA — timestamp-accurate, spike-damped px/s estimate.
+    #     Computed from wall-clock dt × centroid displacement inside _update_track.
+    #     -1.0 = not yet initialised (first frame).
+    vel_ema: float = -1.0
+
+    # 11. Zone enter times — maps zone_name → wall-clock time of first entry.
+    #     Used for hysteresis: entry/exit only recorded after ZONE_DWELL_S seconds.
+    zone_enter_times: Dict[str, float] = field(default_factory=dict)
+
+    # 12. Track quality score [0.0, 1.0] — synthesises hit_streak, conf_ema, and
+    #     trajectory smoothness into a single reliability signal.
+    #     Used to gate analytics confidence without changing event schema.
+    #     Updated every active frame in process().
+    track_quality: float = 0.0
+
 
 # ─── Per-Camera Engine Instance ────────────────────────────────────────────────────
 
@@ -108,6 +154,10 @@ class _CameraEngineState:
     model: object                       # ultralytics YOLO instance
     tracks: Dict[int, Track]            # bytetrack_id → Track
     bytetracker: Optional[object] = None  # BYTETracker instance, only when SAHI enabled
+    # Trajectory archive: tracks moved here by GC instead of deleted outright.
+    # When ByteTrack reassigns the same ID after occlusion, we restore from here
+    # so trajectory history and velocity/direction EMA continue uninterrupted.
+    track_archive: Dict[int, Track] = field(default_factory=dict)
 
 
 # ─── SAHI path helpers ────────────────────────────────────────────────────────
@@ -188,6 +238,29 @@ class TrajectoryEngine:
             logger.info("[TrajectoryEngine] Initialised (SAHI disabled — baseline mode). "
                         "Evidence dir: %s", self._evidence_dir)
 
+        # Night / low-light enhancement (RetinexFormer).
+        # Loaded eagerly so weight errors surface at startup, not mid-stream.
+        # When disabled: _night_enhancer is None — zero overhead, zero code path change.
+        self._night_enhancer = None
+        self._night_brightness_threshold = cfg.NIGHT_BRIGHTNESS_THRESHOLD
+        if cfg.ENABLE_NIGHT_ENHANCEMENT:
+            import torch as _torch
+            _night_device = "cuda" if _torch.cuda.is_available() else "cpu"
+            from night_enhancement import NightEnhancer
+            self._night_enhancer = NightEnhancer(
+                weights_path=cfg.NIGHT_WEIGHTS_PATH,
+                processing_size=cfg.NIGHT_PROCESSING_SIZE,
+                device=_night_device,
+                n_feat=cfg.NIGHT_N_FEAT,
+                stage=cfg.NIGHT_STAGE,
+                num_blocks=cfg.NIGHT_NUM_BLOCKS,
+            )
+            logger.info(
+                "[TrajectoryEngine] Night enhancement ENABLED "
+                "(proc_size=%s, brightness_threshold=%.0f, device=%s)",
+                cfg.NIGHT_PROCESSING_SIZE, cfg.NIGHT_BRIGHTNESS_THRESHOLD, _night_device,
+            )
+
     # ── Public entry point ───────────────────────────────────────────────────
 
     def process(
@@ -215,11 +288,22 @@ class TrajectoryEngine:
             camera_metadata:  Dict with at least {"zone_polygons": {"zone_name": [[x,y],...]}}
         """
         t_start = time.perf_counter()
+        now = time.monotonic()   # single wall-clock snapshot for this entire frame
 
         state = self._get_or_create_camera_state(camera_id)
         zone_polygons: Dict[str, List[Tuple[float, float]]] = self._parse_zone_polygons(camera_metadata)
 
         h, w = frame.shape[:2]
+
+        # ── Night / low-light enhancement (optional) ─────────────────────────
+        # Applied BEFORE detection so YOLO sees a brightness-corrected frame.
+        # Only runs when ENABLE_NIGHT_ENHANCEMENT=True AND the frame is dark enough.
+        # When disabled (_night_enhancer is None): this block is skipped entirely.
+        if self._night_enhancer is not None:
+            mean_brightness = float(frame.mean())
+            if mean_brightness < self._night_brightness_threshold:
+                frame = self._night_enhancer.enhance(frame)
+                # h, w unchanged — enhance() returns same spatial size
 
         # ── Detection: SAHI tiled path OR baseline model.track() ──────────────
         if self._sahi_enabled:
@@ -240,7 +324,16 @@ class TrajectoryEngine:
             boxes = results[0].boxes
 
         if boxes is None or len(boxes) == 0:
+            # Still reset hit_streak for all live tracks — no box matched any of them
+            for t in state.tracks.values():
+                t.hit_streak = 0
+                if t.lifecycle_state == TRACK_ACTIVE:
+                    t.lifecycle_state = TRACK_LOST
             return []
+
+        # Collect which track IDs are active this frame so we can reset streaks
+        # for missed tracks after the loop.
+        active_ids_this_frame: set = set()
 
         events: List[TrajectoryEvent] = []
 
@@ -275,44 +368,114 @@ class TrajectoryEngine:
             y2n = y2_px / h
             bbox_norm = [x1n, y1n, x2n, y2n]
 
+            # ── Minimum detection area filter ─────────────────────────────
+            # Skip tiny bounding boxes that are sensor noise or birds.
+            # Border deployment: a human at 100m occupies ~400-600px² at 1080p.
+            # Set to 0 in config to disable (pass all detections through).
+            box_area_px = (x2_px - x1_px) * (y2_px - y1_px)
+            if box_area_px < cfg.MIN_DETECTION_AREA_PX:
+                continue
+
             # Centre in PIXEL coordinates — used for all internal calculations
             cx_px = (float(xyxy[0]) + float(xyxy[2])) / 2.0
             cy_px = (float(xyxy[1]) + float(xyxy[3])) / 2.0
 
-            # ── Pre-compute velocity from EXISTING trajectory (before new point) ─
-            # This lets us pass vel_px into _update_track for stationary_duration.
-            # calculate_velocity_direction needs at least 2 points; returns (0, 0) otherwise.
-            fps = 25.0
-            vel_px_prev, _dir_prev = calculate_velocity_direction(
-                state.tracks.get(track_id_int, Track(track_id_int, etype, camera_id)).trajectory,
-                fps,
-                window=cfg.TRAJECTORY_SMOOTH_WINDOW,
-            )
-
-            # ── Update / create Track (single call per box per frame) ─────
+            # ── Update / create Track ──────────────────────────────────────────
+            # velocity is now computed INSIDE _update_track from wall-clock dt.
             track = self._update_track(
                 state, track_id_int, etype, camera_id,
-                (cx_px, cy_px), bbox_norm, det_conf, vel_px_prev,
+                (cx_px, cy_px), bbox_norm, det_conf,
             )
+            active_ids_this_frame.add(track_id_int)
 
-            # ── Zone hit-test (normalised — zone polygons are in [0,1]) ──
+            # ── Zone hit-test with hysteresis (ZONE_DWELL_S) ────────────────
+            # Prevents rapid enter/exit flicker for objects on zone boundaries.
+            # An object must remain inside a zone for ZONE_DWELL_S seconds
+            # before the entry is recorded. If it leaves before that, the
+            # pending entry is cancelled (zone_enter_times entry removed).
             cx_norm = (x1n + x2n) / 2.0
             cy_norm = (y1n + y2n) / 2.0
             current_zone = self._detect_zone(cx_norm, cy_norm, zone_polygons)
-            if current_zone and current_zone != track.last_zone:
-                if track.last_zone:
-                    transition = f"{track.last_zone}→{current_zone}"
-                    track.zone_transitions.append(transition)
-                    logger.debug("[TE] Track %d zone transition: %s", track_id_int, transition)
-                # 4. Zone history — record every distinct zone entered
-                track.zone_history.append(current_zone)
-                track.last_zone = current_zone
 
-            # ── Velocity / direction (pixel space) — now uses updated trajectory
-            vel_px, direction = calculate_velocity_direction(
-                track.trajectory, fps, window=cfg.TRAJECTORY_SMOOTH_WINDOW
+            if current_zone:
+                if current_zone not in track.zone_enter_times:
+                    track.zone_enter_times[current_zone] = now
+                dwell = now - track.zone_enter_times[current_zone]
+                if dwell >= cfg.ZONE_DWELL_S and current_zone != track.last_zone:
+                    if track.last_zone:
+                        transition = f"{track.last_zone}→{current_zone}"
+                        track.zone_transitions.append(transition)
+                        logger.debug("[TE] Track %d zone: %s", track_id_int, transition)
+                    track.zone_history.append(current_zone)
+                    track.last_zone = current_zone
+            else:
+                # Object not in any zone — clear pending entry timers
+                # (keeps only the timer for the current confirmed zone, if any)
+                zones_to_clear = [z for z in track.zone_enter_times if z != track.last_zone]
+                for z in zones_to_clear:
+                    del track.zone_enter_times[z]
+
+            # ── Velocity / direction (pixel space) ──────────────────────────
+            # vel_px: from track.vel_ema (timestamp-accurate, EMA-smoothed)
+            # direction: from endpoint-span trajectory + direction EMA unit vector
+            vel_px = max(track.vel_ema, 0.0)
+
+            # Apply noise floor dead zone (do NOT zero direction)
+            if vel_px < cfg.VELOCITY_NOISE_FLOOR_PX_S:
+                vel_px = 0.0
+
+            # ── Direction EMA as unit vector ───────────────────────────────
+            # Heading is computed from the endpoint-span of the SMOOTHED trajectory
+            # (centroid EMA already removed jitter from stored points).
+            # Applied as (dx, dy) unit vector to avoid 0°/360° wraparound.
+            # Only updated when velocity is above dead zone (heading is meaningful).
+            # Below the dead zone, last known EMA heading is held — no zeroing.
+            _, direction_raw = calculate_velocity_direction(
+                track.trajectory, cfg.CAMERA_FPS, window=cfg.TRAJECTORY_SMOOTH_WINDOW
             )
+            if vel_px >= cfg.VELOCITY_NOISE_FLOOR_PX_S or (
+                track.dir_ema_dx == 0.0 and track.dir_ema_dy == 0.0 and direction_raw != 0.0
+            ):
+                dir_rad = math.radians(direction_raw)
+                raw_dx = math.cos(dir_rad)
+                raw_dy = math.sin(dir_rad)
+                if track.dir_ema_dx == 0.0 and track.dir_ema_dy == 0.0:
+                    track.dir_ema_dx, track.dir_ema_dy = raw_dx, raw_dy
+                else:
+                    a = cfg.DIRECTION_EMA_ALPHA
+                    track.dir_ema_dx = a * raw_dx + (1.0 - a) * track.dir_ema_dx
+                    track.dir_ema_dy = a * raw_dy + (1.0 - a) * track.dir_ema_dy
+                mag = math.hypot(track.dir_ema_dx, track.dir_ema_dy)
+                if mag > 1e-9:
+                    track.dir_ema_dx /= mag
+                    track.dir_ema_dy /= mag
 
+            if track.dir_ema_dx == 0.0 and track.dir_ema_dy == 0.0:
+                direction = 0.0
+            else:
+                direction = math.degrees(
+                    math.atan2(track.dir_ema_dy, track.dir_ema_dx)
+                ) % 360.0
+
+
+            # ── EMA confidence smoothing (Phase 3) ────────────────────────
+            # Smooth det_conf with an exponential moving average to reduce
+            # frame-to-frame flicker caused by single low-confidence detections.
+            if track.conf_ema < 0.0:
+                track.conf_ema = det_conf          # first observation: seed directly
+            else:
+                track.conf_ema = (
+                    cfg.CONF_EMA_ALPHA * det_conf
+                    + (1.0 - cfg.CONF_EMA_ALPHA) * track.conf_ema
+                )
+            smoothed_conf = track.conf_ema
+
+            # ── Ghost track suppression (Phase 3) ─────────────────────────
+            # Do not emit events for tracks that ByteTrack has not yet confirmed
+            # (lifecycle_state=NEW). A NEW track has fewer than MIN_HITS frames
+            # and may still be a spurious detection.
+            if cfg.SUPPRESS_NEW_TRACK_EVENTS and track.lifecycle_state == TRACK_NEW:
+                continue
 
             # ── Convert pixel zones to pixel space for behaviour checks ───
             # Zone polygons from camera_metadata are in normalised [0,1].
@@ -323,7 +486,19 @@ class TrajectoryEngine:
             behavior_tags = self._analyze_behavior(track, vel_px, zone_polygons_px)
 
             # ── Detection confidence (clean, not multiplied down) ─────────
-            blended_conf = self._compute_confidence(det_conf, track.frame_count, track.trajectory)
+            blended_conf = self._compute_confidence(smoothed_conf, track.frame_count, track.trajectory)
+
+            # ── Track quality score [0, 1] ────────────────────────────────
+            # Synthesises hit_streak (continuity), conf_ema (detector certainty),
+            # and trajectory smoothness (motion stability) into one signal.
+            # Weights: streak 40%, confidence 40%, smoothness 20%.
+            # Streak saturates at TRACK_AGE_STABLE_FRAMES (30) = quality 1.0.
+            streak_score = min(track.hit_streak / float(cfg.TRACK_AGE_STABLE_FRAMES), 1.0)
+            conf_score = max(track.conf_ema, 0.0)
+            smooth_score = movement_smoothness(track.trajectory, cfg.MAX_EXPECTED_DELTA_PX)
+            track.track_quality = round(
+                0.40 * streak_score + 0.40 * conf_score + 0.20 * smooth_score, 3
+            )
 
             # ── Build and collect event ───────────────────────────────────
             event = self._build_event(
@@ -345,7 +520,43 @@ class TrajectoryEngine:
             )
             events.append(event)
 
+        # ── Hit streak reset for missed tracks (OC-SORT / Norfair pattern) ─
+        # Any track in state.tracks that was NOT returned by ByteTrack this frame
+        # (i.e. not in active_ids_this_frame) missed this detection cycle.
+        # Reset hit_streak to 0 — the track can only re-reach ACTIVE by getting
+        # HIT_STREAK_MIN consecutive hits again after re-detection.
+        for tid, t in state.tracks.items():
+            if tid not in active_ids_this_frame:
+                t.hit_streak = 0
+                if t.lifecycle_state == TRACK_ACTIVE:
+                    t.lifecycle_state = TRACK_LOST
+
+        # ── Stale track GC (archive-based, v3) ───────────────────────────────
+        # Instead of hard-deleting, move stale live tracks to state.track_archive.
+        # ByteTrack often reuses the same numeric ID after short occlusions.
+        # When it does, _update_track finds the archived Track and restores it —
+        # preserving trajectory, vel_ema, dir_ema, and zone history.
+        stale_ids = [
+            tid for tid, t in state.tracks.items()
+            if (now - t.last_seen) > cfg.TRACK_MAX_STALE_S
+        ]
+        for tid in stale_ids:
+            t = state.tracks.pop(tid)
+            t.lifecycle_state = TRACK_LOST
+            state.track_archive[tid] = t
+            logger.debug("[TE] GC: archived track id=%d cam %s", tid, camera_id)
+
+        # Expire archive entries older than TRAJECTORY_ARCHIVE_TTL_S
+        expired_archive = [
+            tid for tid, t in state.track_archive.items()
+            if (now - t.last_seen) > cfg.TRAJECTORY_ARCHIVE_TTL_S
+        ]
+        for tid in expired_archive:
+            del state.track_archive[tid]
+            logger.debug("[TE] GC: expired archive id=%d cam %s", tid, camera_id)
+
         return events
+
 
     # ── Internal helpers ─────────────────────────────────────────────────────
 
@@ -448,54 +659,95 @@ class TrajectoryEngine:
         track_id: int,
         entity_type: str,
         camera_id: str,
-        center_px: Tuple[float, float],   # pixel coordinates
+        center_px: Tuple[float, float],   # raw pixel centroid from ByteTrack
         bbox_norm: List[float],
         det_conf: float,
-        velocity_px: float = 0.0,
     ) -> Track:
         now = time.monotonic()
         if track_id not in state.tracks:
-            state.tracks[track_id] = Track(
-                track_id=track_id,
-                entity_type=entity_type,
-                camera_id=camera_id,
-                _last_update_time=now,
-            )
+            if track_id in state.track_archive:
+                # ByteTrack reused this ID (track re-appeared after occlusion).
+                # Restore from archive — trajectory, vel_ema, dir_ema, zone_history
+                # all preserved. Reset hit_streak so lifecycle re-confirms correctly.
+                state.tracks[track_id] = state.track_archive.pop(track_id)
+                state.tracks[track_id].hit_streak = 0
+                logger.debug("[TE] Restored archived trajectory for track id=%d", track_id)
+            else:
+                state.tracks[track_id] = Track(
+                    track_id=track_id,
+                    entity_type=entity_type,
+                    camera_id=camera_id,
+                    _last_update_time=now,
+                )
 
         track = state.tracks[track_id]
-        dt = now - track._last_update_time   # seconds since last update
+        dt = now - track._last_update_time   # real wall-clock seconds since last hit
         track._last_update_time = now
         track.last_seen = now
         track.frame_count += 1
         track.last_bbox_norm = bbox_norm
         track.last_detection_conf = det_conf
 
-        # 2. Cumulative distance: add Euclidean step from previous point
+        # ── Centroid EMA smoothing ────────────────────────────────────────────
+        # Smooth the raw centroid before storing in trajectory.
+        # This removes jitter from detection noise without touching ByteTrack.
+        # Only the stored trajectory is smoothed; ByteTrack's Kalman is unaffected.
+        a_c = cfg.CENTROID_EMA_ALPHA
+        if track.centroid_ema is None:
+            track.centroid_ema = center_px
+        else:
+            track.centroid_ema = (
+                a_c * center_px[0] + (1.0 - a_c) * track.centroid_ema[0],
+                a_c * center_px[1] + (1.0 - a_c) * track.centroid_ema[1],
+            )
+        smooth_cx, smooth_cy = track.centroid_ema
+
+        # ── Velocity (timestamp-accurate, EMA-smoothed) ───────────────────────
+        # Compute velocity from wall-clock dt so it is FPS-independent.
+        # Apply EMA with VELOCITY_EMA_ALPHA to suppress per-frame spikes.
+        if track.trajectory and dt > 1e-6:
+            prev = track.trajectory[-1]
+            step_px = math.hypot(smooth_cx - prev[0], smooth_cy - prev[1])
+            inst_vel = step_px / dt   # px/s, timestamp-accurate
+            if track.vel_ema < 0.0:
+                track.vel_ema = inst_vel          # seed on first real observation
+            else:
+                a_v = cfg.VELOCITY_EMA_ALPHA
+                track.vel_ema = a_v * inst_vel + (1.0 - a_v) * track.vel_ema
+        elif not track.trajectory:
+            track.vel_ema = 0.0                   # first frame: no displacement
+
+        # ── Cumulative distance (uses smoothed centroid) ───────────────────────
         if track.trajectory:
             prev = track.trajectory[-1]
-            step = ((center_px[0] - prev[0]) ** 2 + (center_px[1] - prev[1]) ** 2) ** 0.5
+            step = math.hypot(smooth_cx - prev[0], smooth_cy - prev[1])
             track.distance_travelled_px += step
 
-        # Append pixel-space centroid to trajectory, cap length
-        track.trajectory.append(center_px)
+        # ── Append smoothed centroid to trajectory, cap history ───────────────
+        track.trajectory.append((smooth_cx, smooth_cy))
         if len(track.trajectory) > cfg.TRAJECTORY_MAX_HISTORY:
             track.trajectory = track.trajectory[-cfg.TRAJECTORY_MAX_HISTORY:]
 
-        # 1. Lifecycle state
-        if track.frame_count < cfg.MIN_HITS:
-            track.lifecycle_state = TRACK_NEW
-        else:
-            track.lifecycle_state = TRACK_ACTIVE
+        # ── Hit streak ────────────────────────────────────────────────────────
+        track.hit_streak += 1
+        track.last_real_obs_px = (smooth_cx, smooth_cy)
 
-        # 3. Stationary duration: accumulate only while below velocity threshold
-        if velocity_px < cfg.LOITER_VELOCITY_THRESHOLD_PX_S and dt > 0:
+        # ── Lifecycle ─────────────────────────────────────────────────────────
+        if track.hit_streak >= cfg.HIT_STREAK_MIN:
+            track.lifecycle_state = TRACK_ACTIVE
+        else:
+            track.lifecycle_state = TRACK_NEW
+
+        # ── Stationary duration (uses vel_ema) ────────────────────────────────
+        vel = max(track.vel_ema, 0.0)
+        if vel < cfg.LOITER_VELOCITY_THRESHOLD_PX_S and dt > 0:
             track.stationary_duration_s += dt
-        elif velocity_px >= cfg.LOITER_VELOCITY_THRESHOLD_PX_S:
-            # Reset if entity starts moving again (configurable behaviour)
+        elif vel >= cfg.LOITER_VELOCITY_THRESHOLD_PX_S:
             if cfg.STATIONARY_RESET_ON_MOVE:
                 track.stationary_duration_s = 0.0
 
         return track
+
 
     def _detect_zone(
         self,

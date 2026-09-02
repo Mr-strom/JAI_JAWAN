@@ -14,3 +14,6 @@ paho-mqtt>=2.0.0
 # Numerics (already a transitive dep of ultralytics, listed for clarity)
 numpy>=1.24.0
 
+# Night/low-light enhancement — RetinexFormer_arch.py (ICCV 2023)
+# Required only when ENABLE_NIGHT_ENHANCEMENT=True; harmless to install always.
+einops>=0.7.0

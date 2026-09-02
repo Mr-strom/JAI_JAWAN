@@ -1,0 +1,24 @@
+# bytetrack_border.yaml — ByteTrack configuration tuned for border surveillance.
+#
+# Rationale for each change vs. ultralytics defaults:
+#   track_high_thresh 0.25 → 0.20  Lower to catch small/far humans at long range
+#                                   that YOLO scores at 0.20-0.24 confidence.
+#   track_low_thresh  0.10 → 0.07  Slightly lower second-stage threshold to improve
+#                                   recovery of briefly occluded targets.
+#   new_track_thresh  0.25 → 0.20  Consistent with track_high_thresh; avoids
+#                                   blocking new small-target track creation.
+#   track_buffer      30   → 60    2 seconds at 30fps. Allows a person walking
+#                                   behind a vehicle or barrier to re-emerge with
+#                                   the same ID (key for intrusion event continuity).
+#   match_thresh      0.80 → 0.85  Slightly stricter IoU association; reduces ID
+#                                   switches when two pedestrians cross paths.
+#   fuse_score        true          Keep on: fusing detection score with IoU
+#                                   stabilises matches for weak small-target detections.
+
+tracker_type: bytetrack
+track_high_thresh: 0.20
+track_low_thresh: 0.07
+new_track_thresh: 0.20
+track_buffer: 60
+match_thresh: 0.85
+fuse_score: True

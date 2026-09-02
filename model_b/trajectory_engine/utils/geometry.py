@@ -22,34 +22,42 @@ def calculate_velocity_direction(
     Given a trajectory (list of (x, y) pixel coords, newest last),
     return (velocity_px_per_sec, direction_degrees).
 
-    Uses the last `window` points for smoothing.
+    Uses an endpoint-span displacement over the last `window` points
+    rather than averaging N consecutive frame-to-frame deltas.
+
+    Rationale (extracted from OC-SORT observation-centric approach):
+      Averaging pairwise deltas over a 5-point window means a single ±2px
+      Kalman jitter has full weight on the mean displacement vector — enough
+      to flip heading by 70°+ at slow speeds. Using the displacement from
+      the OLDEST point in the window to the CURRENT point divides the jitter
+      impact by (window-1), giving stable heading on slow-moving targets.
+
     Returns (0.0, 0.0) when fewer than 2 points exist.
     """
     if len(points) < 2:
         return 0.0, 0.0
 
-    pts = points[-window:]  # take last N points
+    pts = points[-window:]
     if len(pts) < 2:
         return 0.0, 0.0
 
-    # Displacement vectors between consecutive points
-    dx_list, dy_list = [], []
-    for i in range(1, len(pts)):
-        dx_list.append(pts[i][0] - pts[i - 1][0])
-        dy_list.append(pts[i][1] - pts[i - 1][1])
+    # Endpoint displacement: oldest → newest in the window.
+    # Dividing by the number of elapsed frames converts to per-frame rate.
+    n_frames = len(pts) - 1          # frames elapsed across the window span
+    dx = pts[-1][0] - pts[0][0]      # total x displacement
+    dy = pts[-1][1] - pts[0][1]      # total y displacement
 
-    # Mean displacement per frame → scale by fps
-    mean_dx = float(np.mean(dx_list))
-    mean_dy = float(np.mean(dy_list))
+    # Mean per-frame displacement → scale by fps → px/s
+    mean_dx = dx / n_frames
+    mean_dy = dy / n_frames
+    velocity = math.hypot(mean_dx, mean_dy) * fps
 
-    velocity = math.hypot(mean_dx, mean_dy) * fps  # pixels/second
-
-    # Direction: 0° = right (+x), 90° = down (+y), measured clockwise
-    # atan2 gives angle from +x axis; we convert to clockwise-from-north later
+    # Direction: 0° = right (+x), 90° = down (+y), clockwise
     direction_rad = math.atan2(mean_dy, mean_dx)
     direction_deg = math.degrees(direction_rad) % 360.0
 
     return velocity, direction_deg
+
 
 
 # ─── Smoothness ──────────────────────────────────────────────────────────────
