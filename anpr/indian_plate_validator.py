@@ -29,7 +29,6 @@ DEVANAGARI_DIGITS = {
 }
 
 # Devanagari State/Letter representations commonly seen on government/state plates
-# Supports state prefixes: MH, DL, UP, RJ, HR, GJ, PB
 DEVANAGARI_CHARS = {
     'क': 'KA', 'ख': 'KH', 'ग': 'GA', 'घ': 'GH',
     'च': 'CH', 'छ': 'CHH', 'ज': 'JA', 'झ': 'JH',
@@ -118,6 +117,35 @@ class IndianPlateValidator:
         return cleaned, has_devanagari
 
     @classmethod
+    def contextual_ocr_fix(cls, cleaned_text: str) -> str:
+        """
+        Applies positional heuristics to correct OCR substitution errors on standard plates.
+        Standard format: [State: 2 chars][RTO: 2 digits][Series: 1-3 chars][Number: 4 digits]
+        """
+        text = cleaned_text.replace("↑", "").replace("^", "")
+        if len(text) < 8 or len(text) > 11:
+            return cleaned_text
+
+        chars = list(text)
+
+        # 1. First 2 characters must be Letters (State Code)
+        for i in range(min(2, len(chars))):
+            if chars[i].isdigit() and chars[i] in DIGIT_TO_CHAR:
+                chars[i] = DIGIT_TO_CHAR[chars[i]]
+
+        # 2. Next 2 characters (pos 2, 3) must be Digits (RTO Code)
+        for i in range(2, min(4, len(chars))):
+            if chars[i].isalpha() and chars[i] in CHAR_TO_DIGIT:
+                chars[i] = CHAR_TO_DIGIT[chars[i]]
+
+        # 3. Last 4 characters must be Digits (Vehicle registration number)
+        for i in range(max(4, len(chars) - 4), len(chars)):
+            if chars[i].isalpha() and chars[i] in CHAR_TO_DIGIT:
+                chars[i] = CHAR_TO_DIGIT[chars[i]]
+
+        return "".join(chars)
+
+    @classmethod
     def validate(cls, raw_plate_text: str) -> Dict[str, Any]:
         """
         Validates normalized plate string against Indian state-code formats.
@@ -141,8 +169,11 @@ class IndianPlateValidator:
                 "validation_score": 0.0
             }
 
-        # Initial validation against exact cleaned text
+        # Try exact matches first
         formats_to_check = [cleaned]
+        fixed = cls.contextual_ocr_fix(cleaned)
+        if fixed != cleaned:
+            formats_to_check.append(fixed)
 
         for candidate in formats_to_check:
             # Check 1: Standard Indian Plate
