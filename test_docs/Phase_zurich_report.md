@@ -71,3 +71,26 @@ working as designed (see climbing clip result).
   re-verified visually against these runs)
 - Visual confirmation of bounding-box tracking stability and state-text transitions (per script's own
   guidance) — output `.mp4` files should be reviewed frame-by-frame before this is marked complete
+
+## Diagnostic Findings
+
+### Issue A — Missed detection on visible person (walking clip, Frame 42)
+Investigation of raw YOLOv8n output on `walking_clip.mp4` reveals that the person is NOT completely missed by the model. The model does produce a bounding box for the person, but the confidence drops drastically as they move further away:
+- Frame 40: `conf = 0.482`
+- Frame 41: `conf = 0.051`
+- Frame 42: `conf = 0.104`
+- Frame 43: `conf = 0.070`
+- Frame 46: `conf = 0.496`
+
+Because the production `Detector` threshold is hardcoded to `0.40`, these low-confidence detections (frames 41-44) are discarded before reaching the tracker. This indicates YOLOv8n struggles with this specific scale/distance of human subjects. Lowering the threshold or using a larger model (`YOLOv8s`) / higher input resolution may be required.
+
+### Issue B — Ghost detection (combined clip, Frame 542)
+Visual inspection of the `manual_verify.py` output video showed a high-confidence bounding box ("human 0.92") on frame 542 with no person inside it. 
+
+Diagnostic logging confirms this is **NOT** a detector or tracker hallucination, but a rendering artifact in the `manual_verify.py` test harness:
+1. `manual_verify.py` intercepts `detector.detect()` to save `last_detections` for rendering bounding boxes on the output video.
+2. The pipeline's `TimeSampler` correctly identifies frames in this segment as redundant/static and drops them, returning early.
+3. Because the frame is dropped, `detector.detect()` is never called, and `last_detections` is not updated.
+4. The test script proceeds to draw the stale bounding boxes from the *last un-skipped frame* onto the current frame.
+
+The underlying model is correctly outputting `0` detections on these frames. The harness needs to clear `last_detections` when a frame is skipped by the sampler.

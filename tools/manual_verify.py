@@ -37,7 +37,70 @@ def draw_text(img, text, pos, color=(255, 255, 255), scale=0.6, thickness=1):
     cv2.putText(img, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 
-def run_verification(input_path: str, output_path: str):
+def draw_zone_overlay(
+    img: np.ndarray,
+    zone_boundary_native_px: int,
+    frame_height: int,
+    frame_width: int,
+) -> None:
+    """
+    Draw the close_range / long_range zone boundary on a frame in-place.
+
+    ZoneTagger's rule: a detection is close_range when its bbox height
+    >= zone_boundary_native_px (in this camera's native resolution).
+
+    Visualization:
+      - The boundary line is drawn at y = frame_height - zone_boundary_native_px,
+        i.e. the highest y-position a person's *head* can be at while their bbox
+        just meets the threshold (assuming feet at the bottom of frame).
+      - Anything below that line is the close_range region (person is large/nearby).
+      - Anything above is the long_range region (person is small/distant).
+      - Semi-transparent shading makes each zone immediately readable.
+      - A dashed cyan line marks the boundary itself.
+    """
+    # y-position of the boundary line (pixels from top)
+    boundary_y = max(0, frame_height - zone_boundary_native_px)
+
+    # --- Semi-transparent zone shading ---
+    overlay = img.copy()
+
+    # Long-range region (top, above boundary): subtle blue tint
+    if boundary_y > 0:
+        cv2.rectangle(overlay, (0, 0), (frame_width, boundary_y), (180, 80, 0), -1)
+
+    # Close-range region (bottom, below boundary): subtle green tint
+    if boundary_y < frame_height:
+        cv2.rectangle(overlay, (0, boundary_y), (frame_width, frame_height), (0, 100, 0), -1)
+
+    # Blend overlay into the frame (low alpha so the video is still readable)
+    cv2.addWeighted(overlay, 0.12, img, 0.88, 0, img)
+
+    # --- Dashed boundary line ---
+    DASH_LEN = 20
+    GAP_LEN  = 12
+    CYAN     = (255, 220, 0)   # cyan in BGR
+    x = 0
+    while x < frame_width:
+        x_end = min(x + DASH_LEN, frame_width)
+        cv2.line(img, (x, boundary_y), (x_end, boundary_y), CYAN, 2, cv2.LINE_AA)
+        x += DASH_LEN + GAP_LEN
+
+    # --- Boundary label ---
+    draw_text(
+        img,
+        f"Zone boundary ({zone_boundary_native_px}px native)",
+        (10, max(16, boundary_y - 6)),
+        color=CYAN,
+        scale=0.55,
+    )
+
+    # --- Zone region labels (upper-right corner of each region) ---
+    if boundary_y > 40:
+        draw_text(img, "LONG RANGE",  (frame_width - 140, 24), color=(220, 160, 60), scale=0.55)
+    if frame_height - boundary_y > 40:
+        draw_text(img, "CLOSE RANGE", (frame_width - 150, boundary_y + 24), color=(80, 220, 80), scale=0.55)
+
+def run_verification(input_path: str, output_path: str, zone_boundary_px: int = 200):
     logger.info(f"Starting manual verification. Input: {input_path}")
     
     # Check if input is a webcam ID
@@ -68,11 +131,15 @@ def run_verification(input_path: str, output_path: str):
     # We bypass synthetic generators and use the actual classes
     # ---------------------------------------------------------
     camera_id = "cam_manual_verify"
-    zone_tagger = ZoneTagger(camera_id, frame_height_px=height)
+    zone_tagger = ZoneTagger(camera_id, frame_height_px=height, zone_boundary_px=zone_boundary_px)
+    logger.info(
+        f"Zone boundary: {zone_boundary_px}px @ 1080p equivalent "
+        f"= {zone_tagger.zone_boundary_native_px}px native ({height}p)"
+    )
     
-    logger.info("Loading YOLOv8n detector...")
+    logger.info("Loading YOLOv8s detector...")
     try:
-        detector = Detector("yolov8n.pt")
+        detector = Detector("yolov8s.pt")
     except Exception as e:
         logger.error(f"Failed to load Detector: {e}")
         return
@@ -89,10 +156,13 @@ def run_verification(input_path: str, output_path: str):
     # Intercept detector to capture detections for drawing, since the pipeline 
     # process() method encapsulates them and may not return them if no event fires.
     last_detections: List[Detection] = []
+    # We patch the Pipeline's detector to capture raw output before ByteTrack consumes it
     original_detect = pipeline._detector.detect
+    frame_processed = False
     
     def intercept_detect(frame_bgr, frame_number):
-        nonlocal last_detections
+        nonlocal last_detections, frame_processed
+        frame_processed = True
         dets = original_detect(frame_bgr, frame_number)
         last_detections = dets
         return dets
@@ -141,6 +211,7 @@ def run_verification(input_path: str, output_path: str):
         # Run the real pipeline
         # (trigger_type_override=TriggerType.climbing to simulate Model B posture)
         # ---------------------------------------------------------
+        frame_processed = False
         try:
             published_events = pipeline.process(
                 frame=frame.copy(), 
@@ -152,6 +223,9 @@ def run_verification(input_path: str, output_path: str):
             logger.error(f"Pipeline error on frame {frame_num}: {e}")
             schema_failures += 1
             published_events = []
+
+        if not frame_processed:
+            last_detections = []
 
         # Analyze events for tracking
         new_events = bus_client.published_events[events_before:]
@@ -167,6 +241,14 @@ def run_verification(input_path: str, output_path: str):
         # Render visualizations
         # ---------------------------------------------------------
         display_frame = frame.copy()
+
+        # Draw zone overlay FIRST (so bboxes and HUD render on top)
+        draw_zone_overlay(
+            display_frame,
+            zone_tagger.zone_boundary_native_px,
+            height,
+            width,
+        )
         
         # State colors mapping
         state_colors = {
@@ -210,6 +292,13 @@ def run_verification(input_path: str, output_path: str):
         draw_text(display_frame, f"Frame: {frame_num}", (20, 30))
         draw_text(display_frame, f"Time: {timestamp_utc}", (20, 60))
         draw_text(display_frame, f"Active Tracks: {len(pipeline._trig.active_tracks)}", (20, 90))
+        draw_text(
+            display_frame,
+            f"Zone threshold: {zone_boundary_px}px@1080p / {zone_tagger.zone_boundary_native_px}px native",
+            (20, 120),
+            color=(255, 220, 0),
+            scale=0.5,
+        )
 
         # Console log (every 10 frames or if trigger state changes - simplified to every 15 for less spam)
         if frame_num % 15 == 0 or new_events:
@@ -264,8 +353,19 @@ def run_verification(input_path: str, output_path: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Manual verification tool for real video.")
-    parser.add_argument("--input", required=True, help="Path to input video file or 0 for webcam.")
-    parser.add_argument("--output", required=True, help="Path to output annotated .mp4 file.")
+    parser.add_argument("--input",  required=True,  help="Path to input video file or 0 for webcam.")
+    parser.add_argument("--output", required=True,  help="Path to output annotated .mp4 file.")
+    parser.add_argument(
+        "--zone-boundary",
+        type=int,
+        default=200,
+        dest="zone_boundary",
+        help=(
+            "Minimum bbox height (at 1080p equivalent, in pixels) that classifies a "
+            "detection as close_range. Default: 200 (SIH26187 spec). Increase to make "
+            "the close_range zone smaller (push boundary further down); decrease to expand it."
+        ),
+    )
     args = parser.parse_args()
-    
-    run_verification(args.input, args.output)
+
+    run_verification(args.input, args.output, zone_boundary_px=args.zone_boundary)
