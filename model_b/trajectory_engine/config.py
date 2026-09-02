@@ -23,10 +23,39 @@ TOPIC_HEALTH: str = "sih26187/orchestrator/health"
 HEARTBEAT_INTERVAL_S: int = 10          # publish health every N seconds
 
 # ─── MODEL ───────────────────────────────────────────────────────────────────
-YOLO_MODEL_PATH: str = "yolov8n.pt"     # downloaded on first run if not present
-YOLO_CONF_THRESHOLD: float = 0.35
+# YOLO11x: strongest stable model supported by ultralytics 8.4.x on CPU.
+# Chosen over YOLO12x because on CPU-only inference YOLO11x provides near-identical
+# accuracy (54.7 vs 55.9 COCO mAP) at roughly half the FLOP cost (90 vs 200 GFLOPs),
+# giving significantly better latency per frame. Stability over novelty per project spec.
+# Upgrade path: if CUDA is added later, switch YOLO_MODEL_PATH to 'yolo12x.pt'
+# without any other code changes — the ultralytics API is identical.
+YOLO_MODEL_PATH: str = "yolo11x.pt"     # downloaded on first run if not present
+YOLO_CONF_THRESHOLD: float = 0.30       # slightly lower than v8n baseline (0.35);
+                                         # YOLO11x is more precise so fewer false positives
+                                         # at this threshold while recovering small targets.
 YOLO_IOU_THRESHOLD: float = 0.45
 YOLO_CLASSES: list = [0, 2, 3, 5, 7]   # person, car, motorcycle, bus, truck
+
+# ─── SAHI — Sliced Inference for Small/Distant Targets ───────────────────────
+# When ENABLE_SAHI is False the engine runs exactly as before (model.track() per frame).
+# When True, each frame is tiled and YOLO runs on each tile before ByteTrack.
+#
+# Reference implementation:  repos/03_small_object/sahi/
+# Algorithm extracted from:  sahi/slicing.py :: get_slice_bboxes()
+#
+# Recommended starting values for 1080p border surveillance footage:
+#   slice_height/width: 640  (match YOLO training input size)
+#   overlap: 0.2             (20% overlap prevents boundary misses)
+#   nms_iou_threshold: 0.5   (cross-tile duplicate suppression)
+ENABLE_SAHI: bool = True              # master switch — False = zero behaviour change
+
+SAHI_SLICE_HEIGHT: int = 640           # tile height in pixels
+SAHI_SLICE_WIDTH: int = 640            # tile width in pixels
+SAHI_OVERLAP_HEIGHT_RATIO: float = 0.2 # fractional vertical overlap between tiles
+SAHI_OVERLAP_WIDTH_RATIO: float = 0.2  # fractional horizontal overlap between tiles
+SAHI_CONF_THRESHOLD: float = 0.25      # per-tile confidence (lower than full-frame to catch small targets)
+SAHI_NMS_IOU_THRESHOLD: float = 0.5    # IoU threshold for cross-tile NMS merge
+
 
 # ─── BYTETRACK ───────────────────────────────────────────────────────────────
 BYTETRACK_TRACKER_FILE: str = "bytetrack.yaml"   # ultralytics built-in
@@ -75,7 +104,7 @@ FRAME_CAPTURE_TIMEOUT_S: float = 5.0            # how long to wait for a frame
 EVIDENCE_OUTPUT_DIR: str = "evidence_frames"    # where processed frames are saved
 
 # ─── ENGINE META ─────────────────────────────────────────────────────────────
-MODEL_VERSION: str = "TrajectoryEngine-v1.0"
+MODEL_VERSION: str = "TrajectoryEngine-v1.1-yolo11x"
 ENGINE_NAME: str = "trajectory"
 TRACKER_NAME: str = "bytetrack"
 KALMAN_ENABLED: bool = True

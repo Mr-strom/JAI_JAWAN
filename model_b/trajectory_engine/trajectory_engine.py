@@ -95,13 +95,66 @@ class Track:
     zone_history: List[str] = field(default_factory=list)
 
 
-# ─── Per-Camera Engine Instance ──────────────────────────────────────────────
+# ─── Per-Camera Engine Instance ────────────────────────────────────────────────────
 
 @dataclass
 class _CameraEngineState:
-    """Holds the YOLO model + track dict for a single camera."""
-    model: object                   # ultralytics YOLO instance
-    tracks: Dict[int, Track]        # bytetrack_id -> Track
+    """Holds the YOLO model + track dict for a single camera.
+
+    When SAHI is enabled, bytetracker is a BYTETracker instance that receives
+    merged tile detections directly. When SAHI is disabled, bytetracker is None
+    and ByteTrack runs internally via model.track() as before.
+    """
+    model: object                       # ultralytics YOLO instance
+    tracks: Dict[int, Track]            # bytetrack_id → Track
+    bytetracker: Optional[object] = None  # BYTETracker instance, only when SAHI enabled
+
+
+# ─── SAHI path helpers ────────────────────────────────────────────────────────
+
+class _SahiTrackedBox:
+    """Wraps one row of BYTETracker._format_output() into the box interface.
+
+    BYTETracker._format_output() returns rows of:
+        [x1, y1, x2, y2, track_id, conf, cls, idx]
+
+    The per-box loop in process() reads:
+        box.id       → tensor wrapping track_id (or None to skip)
+        box.conf     → tensor [1]
+        box.cls      → tensor [1]
+        box.xyxy[0]  → tensor [4] in full-frame pixels
+
+    This class satisfies that interface without importing ultralytics Results.
+    """
+    def __init__(self, row: "np.ndarray", w: int, h: int) -> None:
+        import torch
+        x1, y1, x2, y2, track_id, conf, cls = float(row[0]), float(row[1]), float(row[2]), float(row[3]), int(row[4]), float(row[5]), float(row[6])
+        self.id   = torch.tensor([track_id])
+        self.conf = torch.tensor([conf])
+        self.cls  = torch.tensor([cls])
+        # shape [1,4] so xyxy[0] works like model.track() output
+        self.xyxy = torch.tensor([[x1, y1, x2, y2]])
+
+
+class _EmptyDetections:
+    """Fed to BYTETracker when no SAHI detections exist in a frame.
+
+    BYTETracker._split_detections() reads .conf and .xywh and checks len().
+    Returning empty numpy arrays lets the tracker correctly age and retire
+    lost tracks even when a frame has no new detections.
+    """
+    def __init__(self) -> None:
+        import numpy as np
+        self.conf = np.empty((0,), dtype=np.float32)
+        self.xywh = np.empty((0, 4), dtype=np.float32)
+        self.cls  = np.empty((0,), dtype=np.float32)
+
+    def __len__(self) -> int:
+        return 0
+
+    def __getitem__(self, mask) -> "_EmptyDetections":
+        return self
+
 
 
 # ─── Trajectory Engine ────────────────────────────────────────────────────────
@@ -119,7 +172,21 @@ class TrajectoryEngine:
         self._cameras: Dict[str, _CameraEngineState] = {}
         self._evidence_dir = Path(cfg.EVIDENCE_OUTPUT_DIR)
         self._evidence_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("[TrajectoryEngine] Initialised. Evidence dir: %s", self._evidence_dir)
+
+        # SAHI import: deferred here so the module can still be imported even if
+        # sahi_inference.py has an issue — fail is surfaced at first use, not import.
+        self._sahi_enabled = cfg.ENABLE_SAHI
+        if self._sahi_enabled:
+            from sahi_inference import run_sahi_inference as _sahi_fn
+            self._run_sahi = _sahi_fn
+            logger.info("[TrajectoryEngine] SAHI sliced inference ENABLED "
+                        "(tiles=%dx%d, overlap=%.1f/%.1f, conf=%.2f)",
+                        cfg.SAHI_SLICE_WIDTH, cfg.SAHI_SLICE_HEIGHT,
+                        cfg.SAHI_OVERLAP_WIDTH_RATIO, cfg.SAHI_OVERLAP_HEIGHT_RATIO,
+                        cfg.SAHI_CONF_THRESHOLD)
+        else:
+            logger.info("[TrajectoryEngine] Initialised (SAHI disabled — baseline mode). "
+                        "Evidence dir: %s", self._evidence_dir)
 
     # ── Public entry point ───────────────────────────────────────────────────
 
@@ -154,21 +221,27 @@ class TrajectoryEngine:
 
         h, w = frame.shape[:2]
 
-        # ── Run YOLOv8n + ByteTrack ────────────────────────────────────────
-        results = state.model.track(
-            frame,
-            tracker=cfg.BYTETRACK_TRACKER_FILE,
-            conf=cfg.YOLO_CONF_THRESHOLD,
-            iou=cfg.YOLO_IOU_THRESHOLD,
-            classes=cfg.YOLO_CLASSES,
-            persist=True,   # keeps ByteTrack state between calls on the same model
-            verbose=False,
-        )
+        # ── Detection: SAHI tiled path OR baseline model.track() ──────────────
+        if self._sahi_enabled:
+            boxes = self._run_sahi_boxes(state, frame, h, w)
+        else:
+            # ── Baseline: YOLO + ByteTrack (unchanged from original) ─────
+            results = state.model.track(
+                frame,
+                tracker=cfg.BYTETRACK_TRACKER_FILE,
+                conf=cfg.YOLO_CONF_THRESHOLD,
+                iou=cfg.YOLO_IOU_THRESHOLD,
+                classes=cfg.YOLO_CLASSES,
+                persist=True,   # keeps ByteTrack state between calls on the same model
+                verbose=False,
+            )
+            if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+                return []
+            boxes = results[0].boxes
 
-        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+        if boxes is None or len(boxes) == 0:
             return []
 
-        boxes = results[0].boxes
         events: List[TrajectoryEvent] = []
 
         for box in boxes:
@@ -182,12 +255,24 @@ class TrajectoryEngine:
 
             etype = self._class_to_entity_type(cls_id)
 
-            # Normalised bbox [x1,y1,x2,y2] — used for schema output only
-            xyxy = box.xyxy[0].cpu().numpy()  # pixel coords
-            x1n = float(xyxy[0]) / w
-            y1n = float(xyxy[1]) / h
-            x2n = float(xyxy[2]) / w
-            y2n = float(xyxy[3]) / h
+            # Normalised bbox [x1,y1,x2,y2] — used for schema output only.
+            # Clamp pixel coords to valid frame bounds BEFORE dividing.
+            # Rationale: BYTETracker's Kalman filter can extrapolate a track's
+            # predicted position slightly outside the frame (e.g. x1 = -0.0015px)
+            # when a target is near an edge. This is expected Kalman behaviour, not
+            # a tracker bug. Without clamping, the resulting normalised value is
+            # fractionally negative and fails Pydantic's [0,1] bbox validation.
+            # The clamp is applied here (at the schema boundary) so all internal
+            # tracking calculations continue to use the raw Kalman coordinates.
+            xyxy = box.xyxy[0].cpu().numpy()  # pixel coords (may be slightly OOB)
+            x1_px = float(max(0.0, min(xyxy[0], w)))
+            y1_px = float(max(0.0, min(xyxy[1], h)))
+            x2_px = float(max(0.0, min(xyxy[2], w)))
+            y2_px = float(max(0.0, min(xyxy[3], h)))
+            x1n = x1_px / w
+            y1n = y1_px / h
+            x2n = x2_px / w
+            y2n = y2_px / h
             bbox_norm = [x1n, y1n, x2n, y2n]
 
             # Centre in PIXEL coordinates — used for all internal calculations
@@ -267,9 +352,84 @@ class TrajectoryEngine:
     def _get_or_create_camera_state(self, camera_id: str) -> _CameraEngineState:
         if camera_id not in self._cameras:
             model = self._YOLO(cfg.YOLO_MODEL_PATH)
-            self._cameras[camera_id] = _CameraEngineState(model=model, tracks={})
-            logger.info("[TE] Created YOLO model instance for cam %s", camera_id)
+
+            bytetracker = None
+            if self._sahi_enabled:
+                # Create a dedicated BYTETracker for SAHI path.
+                # This tracker holds state between frames for this camera (same role as
+                # the internal tracker inside model.track() in the baseline path).
+                from ultralytics.trackers import BYTETracker
+                from ultralytics.utils import IterableSimpleNamespace
+                import importlib.resources as _ir
+                try:
+                    import yaml as _yaml
+                    _pkg = _ir.files("ultralytics") / "cfg" / "trackers" / "bytetrack.yaml"
+                    bt_cfg = _yaml.safe_load(_pkg.read_text())
+                except Exception:
+                    bt_cfg = {
+                        "tracker_type": "bytetrack",
+                        "track_high_thresh": 0.25,
+                        "track_low_thresh": 0.1,
+                        "new_track_thresh": 0.25,
+                        "track_buffer": cfg.MAX_TRACK_AGE,
+                        "match_thresh": 0.8,
+                        "fuse_score": True,
+                    }
+                bytetracker = BYTETracker(IterableSimpleNamespace(**bt_cfg))
+                logger.info("[TE] Created YOLO+BYTETracker for cam %s", camera_id)
+            else:
+                logger.info("[TE] Created YOLO model instance for cam %s", camera_id)
+
+            self._cameras[camera_id] = _CameraEngineState(
+                model=model, tracks={}, bytetracker=bytetracker
+            )
         return self._cameras[camera_id]
+
+    def _run_sahi_boxes(
+        self,
+        state: _CameraEngineState,
+        frame: np.ndarray,
+        h: int,
+        w: int,
+    ) -> Optional[List["_SahiTrackedBox"]]:
+        """Run SAHI tiled inference and return ByteTrack-assigned tracked boxes.
+
+        Called only when cfg.ENABLE_SAHI is True.
+        Returns a list of _SahiTrackedBox objects that expose the same interface
+        (.id .conf .cls .xyxy) as the ultralytics Boxes objects the per-box loop uses.
+        Returns None if no tracked outputs this frame.
+        """
+        # 1. Tiled YOLO inference → merged detections (ByteTracker-compatible)
+        detections = self._run_sahi(
+            model=state.model,
+            frame=frame,
+            slice_height=cfg.SAHI_SLICE_HEIGHT,
+            slice_width=cfg.SAHI_SLICE_WIDTH,
+            overlap_height_ratio=cfg.SAHI_OVERLAP_HEIGHT_RATIO,
+            overlap_width_ratio=cfg.SAHI_OVERLAP_WIDTH_RATIO,
+            conf_threshold=cfg.SAHI_CONF_THRESHOLD,
+            iou_threshold=cfg.YOLO_IOU_THRESHOLD,
+            classes=cfg.YOLO_CLASSES,
+            nms_iou_threshold=cfg.SAHI_NMS_IOU_THRESHOLD,
+        )
+
+        if detections is None or len(detections) == 0:
+            # Still update tracker with empty detections so it ages lost tracks
+            state.bytetracker.update(
+                _EmptyDetections(), frame
+            )
+            return None
+
+        # 2. Feed merged detections into BYTETracker → get tracked output
+        # BYTETracker.update() returns np.ndarray: [x1,y1,x2,y2,track_id,conf,cls,...]
+        tracked = state.bytetracker.update(detections, frame)
+
+        if tracked is None or len(tracked) == 0:
+            return None
+
+        # 3. Wrap tracked rows as _SahiTrackedBox so the loop below stays unchanged
+        return [_SahiTrackedBox(row, w, h) for row in tracked]
+
 
     def _update_track(
         self,

@@ -2,7 +2,7 @@
 # Pin ranges are intentionally loose; tighten for production.
 
 # Core ML
-ultralytics>=8.1.0          # YOLOv8n + built-in ByteTrack + Kalman filtering
+ultralytics>=8.3.0          # YOLO11x (upgraded from YOLOv8n); YOLO11 requires >=8.3.0
 opencv-python-headless>=4.9.0
 
 # Event schema validation
@@ -14,6 +14,3 @@ paho-mqtt>=2.0.0
 # Numerics (already a transitive dep of ultralytics, listed for clarity)
 numpy>=1.24.0
 
-# FastAPI microservice wrapper + ASGI server
-fastapi>=0.111.0
-uvicorn[standard]>=0.29.0
