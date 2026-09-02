@@ -14,7 +14,6 @@ mqtt_bridge.py and camera_stream.py respectively.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -407,10 +406,6 @@ class TrajectoryEngine:
             except (TypeError, IndexError, ValueError):
                 logger.warning("[TE] Skipping malformed polygon for zone '%s'", name)
         return parsed
-
-    def get_active_track_count(self) -> int:
-        """Return total number of live tracks across all cameras."""
-        return sum(len(state.tracks) for state in self._cameras.values())
 
     def cleanup(self) -> None:
         """Release all model resources. Call on shutdown."""

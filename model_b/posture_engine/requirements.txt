@@ -1,0 +1,12 @@
+# MediaPipe Pose — pinned to 0.10.14 (last Windows release with mp.solutions.pose).
+# mediapipe >= 0.10.15 dropped solutions on Windows; do not upgrade without migrating to mediapipe.tasks.
+mediapipe==0.10.14
+
+# Image processing
+opencv-python-headless>=4.9.0
+
+# MQTT client
+paho-mqtt>=2.0.0
+
+# Numerics (transitive dep of mediapipe, listed for clarity)
+numpy>=1.24.0

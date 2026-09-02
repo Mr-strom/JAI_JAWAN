@@ -8,11 +8,17 @@ dist/
 build/
 *.egg
 
-# Virtual environments — engine-scoped venvs
+# Virtual environments
+.venv/
+venv/
 model_b/trajectory_engine/.venv/
 model_b/posture_engine/.venv/
 model_b/face_engine/.venv/
 model_b/anpr_engine/.venv/
+/videos
+/data
+/evidence_frames
+
 
 # Model weights (large binaries — download on first run)
 *.pt
@@ -30,3 +36,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Test directories and artifacts
+tests/
+**/tests/
+
+/total antigravity

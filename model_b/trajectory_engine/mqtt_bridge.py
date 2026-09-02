@@ -36,13 +36,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("mqtt_bridge")
 
-# Shared state — read by api.py for the /health endpoint.
-# Written only by _heartbeat_loop; read-only everywhere else.
-ENGINE_STATE: dict = {
-    "status": "starting",
-    "last_heartbeat": None,
-    "active_tracks": 0,
-}
 
 
 # ─── Camera config loader ─────────────────────────────────────────────────────
@@ -205,21 +198,12 @@ class MQTTBridge:
     def _heartbeat_loop(self) -> None:
         """Publish engine health every HEARTBEAT_INTERVAL_S seconds."""
         while self._running:
-            now = datetime.now(timezone.utc).isoformat()
-            active_tracks = self._engine.get_active_track_count()
-
-            # Update shared state for the /health API endpoint
-            ENGINE_STATE["status"] = "healthy"
-            ENGINE_STATE["last_heartbeat"] = now
-            ENGINE_STATE["active_tracks"] = active_tracks
-
             payload = json.dumps({
                 "engine": cfg.ENGINE_NAME,
                 "model_version": cfg.MODEL_VERSION,
                 "status": "healthy",
-                "timestamp": now,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "active_cameras": list(self._streams.keys()),
-                "active_tracks": active_tracks,
             })
             try:
                 self._client.publish(cfg.TOPIC_HEALTH, payload, qos=0)
