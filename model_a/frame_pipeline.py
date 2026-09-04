@@ -30,16 +30,19 @@ import uuid
 from typing import List, Optional
 
 import numpy as np
+import cv2
 
 from model_a.animal_filter import AnimalFilter
 from model_a.animal_cart_fuser import AnimalCartFuser
 from model_a.anti_spoofing import AntiSpoofingChecker
+from model_a.fallback_router import FallbackRouter
 from model_a.homography import HomographyCorrector
 from model_a.bbox_consistency import BBoxConsistencyChecker
 from model_a.bus_client import BusClient
 from model_a.detector import Detection, Detector
 from model_a.fusion_engine import FusionEngine
 from model_a.preprocessor import Preprocessor
+from model_a.safety_floor import SafetyFloor, _SAFETY_FLOOR_FLAG
 from model_a.schema_v1 import (
     EntityType,
     EventMetadata,
@@ -97,6 +100,8 @@ class FramePipeline:
         animal_filter: Optional[AnimalFilter]         = None,
         animal_cart_fuser: Optional[AnimalCartFuser]   = None,
         homography: Optional[HomographyCorrector]      = None,
+        fallback_router: Optional[FallbackRouter]      = None,
+        safety_floor: Optional[SafetyFloor]            = None,
     ) -> None:
         self.camera_id  = camera_id
         self._zone      = zone_tagger
@@ -115,7 +120,37 @@ class FramePipeline:
         # Homography is purely optional — None means no perspective correction
         self._homography: Optional[HomographyCorrector] = homography
 
+        self._fallback_router: Optional[FallbackRouter] = fallback_router
+        self._safety_floor: SafetyFloor = safety_floor or SafetyFloor(
+            camera_id=camera_id,
+            detector=detector,
+            animal_filter=self._afilt,
+            bbox_checker=self._bbox,
+            trigger_detector=self._trig,
+        )
+        self._latest_motion_evidence: dict[str, tuple[str, str, float]] = {}
+
         os.makedirs(EVIDENCE_DIR, exist_ok=True)
+
+    def _save_evidence(self, frame: Optional[np.ndarray], event_id: str) -> tuple[str, str]:
+        """
+        Save frame image to EVIDENCE_DIR/{camera_id}/{event_id}.jpg and compute SHA-256.
+        Returns (evidence_ref, hash).
+        """
+        cam_dir = os.path.join(EVIDENCE_DIR, self.camera_id)
+        os.makedirs(cam_dir, exist_ok=True)
+        rel_path = os.path.join(EVIDENCE_DIR, self.camera_id, f"{event_id}.jpg").replace("\\", "/")
+        try:
+            if frame is not None and isinstance(frame, np.ndarray) and frame.size > 0:
+                cv2.imwrite(rel_path, frame)
+            else:
+                dummy = np.zeros((100, 100, 3), dtype=np.uint8)
+                cv2.imwrite(rel_path, dummy)
+            file_hash = ModelAEvent.compute_hash(rel_path)
+            return rel_path, file_hash
+        except Exception as exc:
+            logger.error("Failed to write evidence frame for event %s: %s", event_id, exc)
+            return rel_path, "HASH_FAILED"
 
     # ------------------------------------------------------------------
     # Main entry point — called for every raw frame from the RTSP stream
@@ -136,6 +171,20 @@ class FramePipeline:
             Empty list if the frame was skipped or produced no publishable events.
         """
         published: List[ModelAEvent] = []
+        t0_start = time.perf_counter()
+
+        def _calc_latency_ms() -> int:
+            return max(1, int(round((time.perf_counter() - t0_start) * 1000)))
+
+        # Quality gating: Check motion blur via Laplacian variance
+        is_blurry, blur_score = self._pre.check_blur(frame)
+
+        # Fallback router check: evaluate staleness & check if camera is in fallback
+        is_fallback = False
+        if self._fallback_router is not None:
+            self._fallback_router.evaluate()
+            if self.camera_id in self._fallback_router.get_fallback_cameras():
+                is_fallback = True
 
         # --- Step 1: Low-light preprocessing ---
         frame = self._pre.enhance(frame)
@@ -159,8 +208,10 @@ class FramePipeline:
 
         # --- Step 4: Anti-spoofing ---
         spoof_report = self._spoof.check(timestamp_utc, frame_number)
-        # NOTE: spoof_report.is_suspicious does NOT suppress the event.
-        # Flags are stored and forwarded in metadata. (Rule #8)
+        if is_fallback and _SAFETY_FLOOR_FLAG not in spoof_report.flags:
+            spoof_report.flags.append(_SAFETY_FLOOR_FLAG)
+        if is_blurry and "FRAME_BLURRED" not in spoof_report.flags:
+            spoof_report.flags.append("FRAME_BLURRED")
 
         # --- Step 5: Detection — dual-zone routing ---
         #
@@ -230,13 +281,21 @@ class FramePipeline:
 
         # Publish animal_detected info events for plain animals
         for adet in animal_dets:
-            event = self._build_animal_event(adet, frame_number, timestamp_utc, spoof_report.flags)
+            event = self._build_animal_event(
+                adet, frame_number, timestamp_utc, spoof_report.flags,
+                frame=frame, processing_time_ms=_calc_latency_ms(),
+                fallback_active=is_fallback, blur_score=blur_score, is_blurry=is_blurry
+            )
             self._publish(event)
             published.append(event)
 
         # Publish animal_detected info events for confirmed animal_cart detections
         for cdet in cart_dets:
-            event = self._build_animal_event(cdet, frame_number, timestamp_utc, spoof_report.flags)
+            event = self._build_animal_event(
+                cdet, frame_number, timestamp_utc, spoof_report.flags,
+                frame=frame, processing_time_ms=_calc_latency_ms(),
+                fallback_active=is_fallback, blur_score=blur_score, is_blurry=is_blurry
+            )
             self._publish(event)
             published.append(event)
 
@@ -249,7 +308,9 @@ class FramePipeline:
                     self.camera_id, det.track_id or str(uuid.uuid4()), det.bbox, det.entity_type.value
                 )
                 motion_event = self._build_motion_event(
-                    det, zone_tag, zone, global_id, frame_number, timestamp_utc, spoof_report.flags
+                    det, zone_tag, zone, global_id, frame_number, timestamp_utc, spoof_report.flags,
+                    frame=frame, processing_time_ms=_calc_latency_ms(),
+                    fallback_active=is_fallback, blur_score=blur_score, is_blurry=is_blurry
                 )
                 self._publish(motion_event)
                 published.append(motion_event)
@@ -291,16 +352,21 @@ class FramePipeline:
             )
 
             trigger_event = self._build_trigger_event(
-                det         = det,
-                trigger_type = ttype,
-                result_severity = result.severity,
+                det                 = det,
+                trigger_type        = ttype,
+                result_severity     = result.severity,
                 confirmation_frames = result.confirmation_frames,
-                zone_tag    = zone_tag,
-                zone        = zone,
-                global_id   = global_id,
-                frame_number = frame_number,
-                timestamp_utc = timestamp_utc,
-                spoofing_flags = spoof_report.flags,
+                zone_tag            = zone_tag,
+                zone                = zone,
+                global_id           = global_id,
+                frame_number        = frame_number,
+                timestamp_utc       = timestamp_utc,
+                spoofing_flags      = spoof_report.flags,
+                frame               = frame,
+                processing_time_ms  = _calc_latency_ms(),
+                fallback_active     = is_fallback,
+                blur_score          = blur_score,
+                is_blurry           = is_blurry,
             )
 
             if trigger_event is not None:
@@ -323,9 +389,17 @@ class FramePipeline:
         frame_number: int,
         timestamp_utc: str,
         spoofing_flags: list[str],
+        frame: Optional[np.ndarray] = None,
+        processing_time_ms: int = 1,
+        fallback_active: bool = False,
+        blur_score: Optional[float] = None,
+        is_blurry: bool = False,
     ) -> ModelAEvent:
         zone_tag, zone = self._zone.tag(det.bbox)
+        event_id = str(uuid.uuid4())
+        evidence_ref, file_hash = self._save_evidence(frame, event_id)
         return ModelAEvent(
+            event_id     = event_id,
             event_type   = EventType.animal_detected,
             severity     = Severity.info,
             timestamp    = timestamp_utc,
@@ -336,15 +410,18 @@ class FramePipeline:
             entity_id    = det.track_id,
             confidence   = det.confidence,
             bbox         = det.bbox,
-            evidence_ref = "pending",
-            hash         = "pending",
+            evidence_ref = evidence_ref,
+            hash         = file_hash,
             metadata     = EventMetadata(
-                model_version      = MODEL_VERSION,
-                processing_time_ms = 0,
-                frame_number       = frame_number,
-                trigger_type       = None,
+                model_version       = MODEL_VERSION,
+                processing_time_ms  = max(1, processing_time_ms),
+                frame_number        = frame_number,
+                trigger_type        = None,
                 confirmation_frames = 0,
-                spoofing_flags     = spoofing_flags,
+                spoofing_flags      = spoofing_flags,
+                fallback_active     = fallback_active,
+                blur_score          = blur_score,
+                is_blurry           = is_blurry,
             ),
         )
 
@@ -357,8 +434,25 @@ class FramePipeline:
         frame_number: int,
         timestamp_utc: str,
         spoofing_flags: list[str],
+        frame: Optional[np.ndarray] = None,
+        processing_time_ms: int = 1,
+        fallback_active: bool = False,
+        blur_score: Optional[float] = None,
+        is_blurry: bool = False,
     ) -> ModelAEvent:
+        event_id = str(uuid.uuid4())
+        now_mono = time.monotonic()
+        last_entry = self._latest_motion_evidence.get(entity_id)
+
+        # Rate-limit motion image saving: 1 keyframe per second per entity
+        if last_entry is None or (now_mono - last_entry[2]) >= 1.0:
+            evidence_ref, file_hash = self._save_evidence(frame, event_id)
+            self._latest_motion_evidence[entity_id] = (evidence_ref, file_hash, now_mono)
+        else:
+            evidence_ref, file_hash, _ = last_entry
+
         return ModelAEvent(
+            event_id     = event_id,
             event_type   = EventType.motion,
             severity     = Severity.info,
             timestamp    = timestamp_utc,
@@ -369,15 +463,18 @@ class FramePipeline:
             entity_id    = entity_id,
             confidence   = det.confidence,
             bbox         = det.bbox,
-            evidence_ref = "pending",
-            hash         = "pending",
+            evidence_ref = evidence_ref,
+            hash         = file_hash,
             metadata     = EventMetadata(
-                model_version      = MODEL_VERSION,
-                processing_time_ms = 0,
-                frame_number       = frame_number,
-                trigger_type       = None,
+                model_version       = MODEL_VERSION,
+                processing_time_ms  = max(1, processing_time_ms),
+                frame_number        = frame_number,
+                trigger_type        = None,
                 confirmation_frames = 0,
-                spoofing_flags     = spoofing_flags,
+                spoofing_flags      = spoofing_flags,
+                fallback_active     = fallback_active,
+                blur_score          = blur_score,
+                is_blurry           = is_blurry,
             ),
         )
 
@@ -393,13 +490,21 @@ class FramePipeline:
         frame_number: int,
         timestamp_utc: str,
         spoofing_flags: list[str],
+        frame: Optional[np.ndarray] = None,
+        processing_time_ms: int = 1,
+        fallback_active: bool = False,
+        blur_score: Optional[float] = None,
+        is_blurry: bool = False,
     ) -> Optional[ModelAEvent]:
         """
         Build and validate a trigger event.
         Returns None if Pydantic validation fails (malformed → logged, not published).
         """
         try:
+            event_id = str(uuid.uuid4())
+            evidence_ref, file_hash = self._save_evidence(frame, event_id)
             return ModelAEvent(
+                event_id     = event_id,
                 event_type   = EventType.trigger,
                 severity     = result_severity,
                 timestamp    = timestamp_utc,
@@ -410,15 +515,18 @@ class FramePipeline:
                 entity_id    = global_id,
                 confidence   = det.confidence,
                 bbox         = det.bbox,
-                evidence_ref = "pending",
-                hash         = "pending",
+                evidence_ref = evidence_ref,
+                hash         = file_hash,
                 metadata     = EventMetadata(
-                    model_version      = MODEL_VERSION,
-                    processing_time_ms = 0,
-                    frame_number       = frame_number,
-                    trigger_type       = trigger_type,
+                    model_version       = MODEL_VERSION,
+                    processing_time_ms  = max(1, processing_time_ms),
+                    frame_number        = frame_number,
+                    trigger_type        = trigger_type,
                     confirmation_frames = min(10, confirmation_frames),
-                    spoofing_flags     = spoofing_flags,
+                    spoofing_flags      = spoofing_flags,
+                    fallback_active     = fallback_active,
+                    blur_score          = blur_score,
+                    is_blurry           = is_blurry,
                 ),
             )
         except Exception as exc:

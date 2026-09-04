@@ -81,6 +81,9 @@ class EventMetadata(BaseModel):
     confirmation_frames: int   = Field(..., ge=0, le=10,
                                        description="Frames confirming trigger. Must be >=3 for confirmed/critical.")
     spoofing_flags:      List[str] = Field(default_factory=list)
+    fallback_active:     bool      = Field(default=False, description="True when running in fallback/degraded mode")
+    blur_score:          Optional[float] = Field(default=None, description="Laplacian variance sharpness score")
+    is_blurry:           bool      = Field(default=False, description="True if frame blur exceeds threshold")
 
 
 # ---------------------------------------------------------------------------

@@ -35,20 +35,27 @@ logger = logging.getLogger(__name__)
 _DARK_MEAN_THRESHOLD  = 60.0    # mean luminance below this → apply enhancement
 _CLAHE_CLIP_LIMIT     = 2.0
 _CLAHE_TILE_GRID      = (8, 8)
+_BLUR_THRESHOLD       = 100.0   # Laplacian variance below this is flagged as blurry
 
 
 class Preprocessor:
     """
-    Low-light frame enhancement.
+    Low-light frame enhancement and image quality / blur gating.
 
     Usage::
 
         pre = Preprocessor(zerodce_onnx_path="models/zerodce.onnx")
         enhanced = pre.enhance(frame)
+        is_blurry, blur_score = pre.check_blur(frame)
         # enhanced is always a valid BGR uint8 frame.
     """
 
-    def __init__(self, zerodce_onnx_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        zerodce_onnx_path: Optional[str] = None,
+        blur_threshold: float = _BLUR_THRESHOLD,
+    ) -> None:
+        self.blur_threshold = blur_threshold
         self._ort_session = None
         self._clahe = cv2.createCLAHE(
             clipLimit=_CLAHE_CLIP_LIMIT,
@@ -74,6 +81,27 @@ class Preprocessor:
         """Return True if the frame needs low-light enhancement."""
         grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         return float(np.mean(grey)) < _DARK_MEAN_THRESHOLD
+
+    def check_blur(self, frame: np.ndarray) -> tuple[bool, float]:
+        """
+        Check image sharpness using Laplacian variance.
+        Returns:
+            (is_blurry: bool, score: float)
+            where score is cv2.Laplacian(gray, cv2.CV_64F).var().
+            Score below blur_threshold flags the frame as blurry.
+        """
+        if frame is None or frame.size == 0:
+            return True, 0.0
+        if len(frame.shape) == 3 and frame.shape[2] == 3:
+            grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        elif len(frame.shape) == 2:
+            grey = frame
+        else:
+            grey = cv2.cvtColor(frame, cv2.COLOR_BGRA2GRAY)
+
+        score = float(cv2.Laplacian(grey, cv2.CV_64F).var())
+        is_blurry = score < self.blur_threshold
+        return is_blurry, round(score, 2)
 
     def enhance(self, frame: np.ndarray) -> np.ndarray:
         """

@@ -1,0 +1,177 @@
+[
+  {
+    "event_id": "813ff161-79cd-4ecc-8d02-dd69af677542",
+    "event_type": "motion",
+    "severity": "info",
+    "timestamp": "2026-09-04T12:01:02.000Z",
+    "camera_id": "cam_chokepoint_anpr_01",
+    "zone_tag": "close_range",
+    "zone": "chokepoint",
+    "entity_type": "vehicle",
+    "entity_id": "f2816912-e646-4684-9ecc-d277b7173f49",
+    "confidence": 0.614194929599762,
+    "bbox": [
+      0.36850523948669434,
+      0.7421947121620178,
+      0.6225965023040771,
+      0.9930892586708069
+    ],
+    "evidence_ref": "./evidence/cam_chokepoint_anpr_01/813ff161-79cd-4ecc-8d02-dd69af677542.jpg",
+    "hash": "8503cd57e2e811977f720888f88bf31a029b95480dc21e4f491e967882ae7844",
+    "engine_source": "model_a",
+    "metadata": {
+      "model_version": "1.0.0",
+      "processing_time_ms": 140,
+      "frame_number": 62,
+      "trigger_type": null,
+      "confirmation_frames": 0,
+      "spoofing_flags": [
+        "FPS_ANOMALY:measured=1.0 expected=25.0 deviation=96.0%",
+        "FRAME_BLURRED"
+      ],
+      "fallback_active": false,
+      "blur_score": 25.88,
+      "is_blurry": true
+    }
+  },
+  {
+    "event_id": "56c0ac6a-8788-4e15-8b41-df5827357367",
+    "event_type": "motion",
+    "severity": "info",
+    "timestamp": "2026-09-04T12:01:03.000Z",
+    "camera_id": "cam_chokepoint_anpr_01",
+    "zone_tag": "close_range",
+    "zone": "chokepoint",
+    "entity_type": "vehicle",
+    "entity_id": "2e7687af-c47c-4e22-a3a8-52962e3c63b5",
+    "confidence": 0.6561461687088013,
+    "bbox": [
+      0.36627456545829773,
+      0.6950646042823792,
+      0.6226459741592407,
+      0.9933268427848816
+    ],
+    "evidence_ref": "./evidence/cam_chokepoint_anpr_01/56c0ac6a-8788-4e15-8b41-df5827357367.jpg",
+    "hash": "50f400231d0fd87f8570914ea81c042a93e691f6ae9c7980064fef99b22ddcc7",
+    "engine_source": "model_a",
+    "metadata": {
+      "model_version": "1.0.0",
+      "processing_time_ms": 139,
+      "frame_number": 63,
+      "trigger_type": null,
+      "confirmation_frames": 0,
+      "spoofing_flags": [
+        "FPS_ANOMALY:measured=1.0 expected=25.0 deviation=96.0%",
+        "FRAME_BLURRED"
+      ],
+      "fallback_active": false,
+      "blur_score": 29.0,
+      "is_blurry": true
+    }
+  },
+  {
+    "event_id": "87626501-bb2a-4e40-8596-7c6377081023",
+    "event_type": "motion",
+    "severity": "info",
+    "timestamp": "2026-09-04T12:01:04.000Z",
+    "camera_id": "cam_chokepoint_anpr_01",
+    "zone_tag": "close_range",
+    "zone": "chokepoint",
+    "entity_type": "vehicle",
+    "entity_id": "5f0a514c-b306-465d-a154-25c16b836565",
+    "confidence": 0.5309576392173767,
+    "bbox": [
+      0.36504828929901123,
+      0.6673673987388611,
+      0.623515784740448,
+      0.9909611940383911
+    ],
+    "evidence_ref": "./evidence/cam_chokepoint_anpr_01/87626501-bb2a-4e40-8596-7c6377081023.jpg",
+    "hash": "9880f228ffcb1d7d042da632451360ee9c98a1b1420dd029447189a12d02c3dd",
+    "engine_source": "model_a",
+    "metadata": {
+      "model_version": "1.0.0",
+      "processing_time_ms": 135,
+      "frame_number": 64,
+      "trigger_type": null,
+      "confirmation_frames": 0,
+      "spoofing_flags": [
+        "FPS_ANOMALY:measured=1.0 expected=25.0 deviation=96.0%",
+        "FRAME_BLURRED"
+      ],
+      "fallback_active": false,
+      "blur_score": 29.28,
+      "is_blurry": true
+    }
+  },
+  {
+    "event_id": "1a95144c-e40c-447b-bbcd-fc8e62ad5180",
+    "event_type": "motion",
+    "severity": "info",
+    "timestamp": "2026-09-04T12:01:05.000Z",
+    "camera_id": "cam_chokepoint_anpr_01",
+    "zone_tag": "close_range",
+    "zone": "chokepoint",
+    "entity_type": "vehicle",
+    "entity_id": "7c69a850-d45f-4367-8e0c-a2c2e7fb2147",
+    "confidence": 0.5699905753135681,
+    "bbox": [
+      0.3636482059955597,
+      0.6396493315696716,
+      0.6250894665718079,
+      0.9909586310386658
+    ],
+    "evidence_ref": "./evidence/cam_chokepoint_anpr_01/1a95144c-e40c-447b-bbcd-fc8e62ad5180.jpg",
+    "hash": "13ef00780fff026b22c2b34d1d1d05eb3de388edeedacdde42a51d06257af081",
+    "engine_source": "model_a",
+    "metadata": {
+      "model_version": "1.0.0",
+      "processing_time_ms": 138,
+      "frame_number": 65,
+      "trigger_type": null,
+      "confirmation_frames": 0,
+      "spoofing_flags": [
+        "FPS_ANOMALY:measured=1.0 expected=25.0 deviation=96.0%",
+        "FRAME_BLURRED"
+      ],
+      "fallback_active": false,
+      "blur_score": 31.52,
+      "is_blurry": true
+    }
+  },
+  {
+    "event_id": "ad40bfb9-48e5-4ce0-bdb9-14dd6d035f57",
+    "event_type": "motion",
+    "severity": "info",
+    "timestamp": "2026-09-04T12:01:07.000Z",
+    "camera_id": "cam_chokepoint_anpr_01",
+    "zone_tag": "close_range",
+    "zone": "chokepoint",
+    "entity_type": "vehicle",
+    "entity_id": "83714e02-697f-4430-a855-38df9e3e3218",
+    "confidence": 0.5065182447433472,
+    "bbox": [
+      0.3588006794452667,
+      0.5713024735450745,
+      0.6262680888175964,
+      0.9909088611602783
+    ],
+    "evidence_ref": "./evidence/cam_chokepoint_anpr_01/ad40bfb9-48e5-4ce0-bdb9-14dd6d035f57.jpg",
+    "hash": "4f823d7f8b5ad03c8be19ab2410dd48817baa77a91d1992812347927f9070918",
+    "engine_source": "model_a",
+    "metadata": {
+      "model_version": "1.0.0",
+      "processing_time_ms": 142,
+      "frame_number": 67,
+      "trigger_type": null,
+      "confirmation_frames": 0,
+      "spoofing_flags": [
+        "FPS_ANOMALY:measured=1.0 expected=25.0 deviation=96.0%",
+        "FRAME_BLURRED"
+      ],
+      "fallback_active": false,
+      "blur_score": 38.03,
+      "is_blurry": true
+    }
+  }
+]

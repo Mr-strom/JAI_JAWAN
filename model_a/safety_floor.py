@@ -35,8 +35,12 @@ from __future__ import annotations
 
 import datetime
 import logging
+import os
+import time
+import uuid
 from typing import List, Optional
 
+import cv2
 import numpy as np
 
 from model_a.animal_filter import AnimalFilter
@@ -57,6 +61,7 @@ from model_a.trigger_detector import TriggerDetector
 logger = logging.getLogger(__name__)
 
 MODEL_VERSION     = "1.0.0"
+EVIDENCE_DIR      = os.environ.get("EVIDENCE_DIR", "./evidence")
 _SAFETY_FLOOR_FLAG = "SAFETY_FLOOR_ACTIVE"   # informational flag for dashboards
 
 
@@ -131,6 +136,7 @@ class SafetyFloor:
         """
         published: List[ModelAEvent] = []
         spoofing_flags = [_SAFETY_FLOOR_FLAG]
+        t0 = time.perf_counter()
 
         # --- YOLO detection ---
         detections = self._detector.detect(frame, frame_number)
@@ -138,17 +144,22 @@ class SafetyFloor:
         # --- Animal filtering ---
         animal_dets, trigger_candidates = self._afilt.classify(detections)
 
+        def _calc_latency_ms() -> int:
+            return max(1, int(round((time.perf_counter() - t0) * 1000)))
+
         # Animal info events
         for adet in animal_dets:
             event = self._build_event(
-                event_type       = EventType.animal_detected,
-                severity         = Severity.info,
-                det              = adet,
-                frame_number     = frame_number,
-                timestamp_utc    = timestamp_utc,
-                spoofing_flags   = spoofing_flags,
-                trigger_type     = None,
+                event_type          = EventType.animal_detected,
+                severity            = Severity.info,
+                det                 = adet,
+                frame_number        = frame_number,
+                timestamp_utc       = timestamp_utc,
+                spoofing_flags      = spoofing_flags,
+                trigger_type        = None,
                 confirmation_frames = 0,
+                frame               = frame,
+                processing_time_ms  = _calc_latency_ms(),
             )
             if event:
                 published.append(event)
@@ -156,14 +167,16 @@ class SafetyFloor:
         # Motion events for human/vehicle detections
         for det in trigger_candidates:
             motion = self._build_event(
-                event_type       = EventType.motion,
-                severity         = Severity.info,
-                det              = det,
-                frame_number     = frame_number,
-                timestamp_utc    = timestamp_utc,
-                spoofing_flags   = spoofing_flags,
-                trigger_type     = None,
+                event_type          = EventType.motion,
+                severity            = Severity.info,
+                det                 = det,
+                frame_number        = frame_number,
+                timestamp_utc       = timestamp_utc,
+                spoofing_flags      = spoofing_flags,
+                trigger_type        = None,
                 confirmation_frames = 0,
+                frame               = frame,
+                processing_time_ms  = _calc_latency_ms(),
             )
             if motion:
                 published.append(motion)
@@ -182,14 +195,16 @@ class SafetyFloor:
                 result = self._trigger.update(det.track_id, trigger_type_hint, frame_number)
                 if result.should_publish:
                     trigger_event = self._build_event(
-                        event_type       = EventType.trigger,
-                        severity         = result.severity,
-                        det              = det,
-                        frame_number     = frame_number,
-                        timestamp_utc    = timestamp_utc,
-                        spoofing_flags   = spoofing_flags,
-                        trigger_type     = trigger_type_hint,
+                        event_type          = EventType.trigger,
+                        severity            = result.severity,
+                        det                 = det,
+                        frame_number        = frame_number,
+                        timestamp_utc       = timestamp_utc,
+                        spoofing_flags      = spoofing_flags,
+                        trigger_type        = trigger_type_hint,
                         confirmation_frames = result.confirmation_frames,
+                        frame               = frame,
+                        processing_time_ms  = _calc_latency_ms(),
                     )
                     if trigger_event:
                         published.append(trigger_event)
@@ -218,9 +233,24 @@ class SafetyFloor:
         spoofing_flags:      List[str],
         trigger_type:        Optional[TriggerType],
         confirmation_frames: int,
+        frame:               Optional[np.ndarray] = None,
+        processing_time_ms:  int = 1,
     ) -> Optional[ModelAEvent]:
         try:
+            event_id = str(uuid.uuid4())
+            cam_dir = os.path.join(EVIDENCE_DIR, self.camera_id)
+            os.makedirs(cam_dir, exist_ok=True)
+            rel_path = os.path.join(EVIDENCE_DIR, self.camera_id, f"{event_id}.jpg").replace("\\", "/")
+
+            if frame is not None and isinstance(frame, np.ndarray) and frame.size > 0:
+                cv2.imwrite(rel_path, frame)
+            else:
+                dummy = np.zeros((100, 100, 3), dtype=np.uint8)
+                cv2.imwrite(rel_path, dummy)
+            file_hash = ModelAEvent.compute_hash(rel_path)
+
             return ModelAEvent(
+                event_id     = event_id,
                 event_type   = event_type,
                 severity     = severity,
                 timestamp    = timestamp_utc,
@@ -231,15 +261,16 @@ class SafetyFloor:
                 entity_id    = det.track_id,
                 confidence   = det.confidence,
                 bbox         = det.bbox,
-                evidence_ref = "pending",
-                hash         = "pending",
+                evidence_ref = rel_path,
+                hash         = file_hash,
                 metadata     = EventMetadata(
-                    model_version      = MODEL_VERSION,
-                    processing_time_ms = 0,
-                    frame_number       = frame_number,
-                    trigger_type       = trigger_type,
+                    model_version       = MODEL_VERSION,
+                    processing_time_ms  = max(1, processing_time_ms),
+                    frame_number        = frame_number,
+                    trigger_type        = trigger_type,
                     confirmation_frames = confirmation_frames,
-                    spoofing_flags     = spoofing_flags,
+                    spoofing_flags      = spoofing_flags,
+                    fallback_active     = True,
                 ),
             )
         except Exception as exc:
